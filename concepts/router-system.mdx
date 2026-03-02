@@ -1,0 +1,270 @@
+---
+title: Router System
+description: Understanding the Router layer, RouterLogic, and RouterManager
+---
+
+## Overview
+
+The Router is the central entry point for all settlement operations in the Warp Router ecosystem. It orchestrates cross-chain settlement operations and protocol integrations through a flexible adapter architecture.
+
+<Note>
+The Router contract is deployed at a deterministic storage layout position to ensure predictable deployment and integration patterns across chains.
+</Note>
+
+## Architecture
+
+The Router system consists of three main components:
+
+<CardGroup cols={3}>
+  <Card title="Router" icon="route">
+    Main entry point contract that inherits all functionality
+  </Card>
+  <Card title="RouterLogic" icon="brain">
+    Core routing logic for fill and claim operations
+  </Card>
+  <Card title="RouterManager" icon="sliders">
+    Adapter lifecycle management with role-based access control
+  </Card>
+</CardGroup>
+
+### Router Contract
+
+The `Router` contract serves as the primary entry point with a deterministic storage layout:
+
+```solidity Router.sol
+contract Router layout at 88_967_819_156_726_863_884_428_300_865_593_401_225_272_190_543_010_065_736_923_496_773_938_567_778_360
+    is RouterLogic, RouterUtils
+{
+    constructor(address atomicFillSigner, address adder, address remover) 
+        RouterLogic(atomicFillSigner, adder, remover) 
+    { }
+}
+```
+
+<Info>
+The custom storage layout position ensures that state variables occupy predictable storage slots across deployments, enabling advanced patterns like proxy-based upgrades.
+</Info>
+
+### RouterLogic
+
+RouterLogic implements the core routing functionality for all settlement operations:
+
+```solidity RouterLogic.sol
+contract RouterLogic is IRouter, RouterManager, DirectRoutes, ReentrancyGuardTransient {
+    constructor(address atomicFillSigner, address adder, address remover) 
+        RouterManager(adder, remover) 
+    {
+        $atomicFillSigner = atomicFillSigner;
+    }
+}
+```
+
+**Key Responsibilities:**
+
+1. **Operation Routing** - Routes fill and claim operations to appropriate protocol adapters
+2. **Atomic Execution** - Ensures batched operations execute atomically or revert entirely
+3. **Gas Optimization** - Implements advanced caching and optimization techniques
+4. **Security Enforcement** - Validates signatures and prevents unauthorized operations
+5. **Context Management** - Manages solver-specific contexts for each operation
+
+### RouterManager
+
+RouterManager handles the adapter lifecycle with semantic versioning:
+
+```solidity RouterManager.sol
+contract RouterManager is AccessControl, IRouterManager {
+    bytes32 internal constant ADD_ROLE = bytes32(uint256(0x1001));
+    bytes32 internal constant RM_ROLE = bytes32(uint256(0x1002));
+    address public $atomicFillSigner;
+}
+```
+
+**Management Functions:**
+
+<Tabs>
+  <Tab title="Install Adapters">
+    ```solidity
+    function installFillAdapter(
+        bytes2 protocolVersion,
+        bytes4 selector,
+        address adapter
+    ) external onlyRole(ADD_ROLE)
+    ```
+    
+    Install new adapters for fill operations with version validation.
+  </Tab>
+  <Tab title="Hotfix Adapters">
+    ```solidity
+    function hotfixFillAdapter(
+        bytes2 version,
+        bytes4 selector,
+        address adapter
+    ) external onlyRole(ADD_ROLE)
+    ```
+    
+    Apply patch-only upgrades to existing adapters (semantic versioning enforced).
+  </Tab>
+  <Tab title="Retire Adapters">
+    ```solidity
+    function retireFillAdapter(
+        bytes2 version,
+        bytes4 selector
+    ) external onlyRole(RM_ROLE)
+    ```
+    
+    Remove deprecated or compromised adapters from routing.
+  </Tab>
+</Tabs>
+
+## Atomic Fill Security
+
+The Router uses an atomic fill signer to authorize batch operations:
+
+```solidity RouterLogic.sol
+function _isAtomic(bytes32 hash, bytes calldata atomicSig) 
+    internal virtual returns (bool atomic) 
+{
+    address signer = $atomicFillSigner;
+    require(signer != address(0), IRouter.AtomicSignerNotSet());
+    atomic = (signer == ECDSA.recoverCalldata(hash, atomicSig));
+}
+```
+
+<Warning>
+The `atomicFillSigner` is immutable after deployment. Setting it to `address(0)` effectively pauses all fill operations while preserving claim functionality.
+</Warning>
+
+**Security Features:**
+
+- **Single Authorized Signer** - Only the designated signer can authorize fill batches
+- **Replay Protection** - Signatures are bound to specific calldata via hash
+- **ECDSA Recovery** - Efficient signature verification without public key input
+- **Pausable** - Setting signer to zero address pauses fills
+
+## Operation Flow
+
+<Steps>
+  <Step title="Submit Operation">
+    User or solver submits fill or claim operation to Router
+  </Step>
+  <Step title="Signature Validation">
+    Router validates atomic fill signature (for fills only)
+  </Step>
+  <Step title="Adapter Resolution">
+    Router resolves function selector to adapter address
+  </Step>
+  <Step title="Delegatecall Execution">
+    Router delegatecalls adapter with relayer context
+  </Step>
+  <Step title="Settlement">
+    Adapter coordinates with arbiter for final settlement
+  </Step>
+</Steps>
+
+## Gas Optimizations
+
+The Router implements several gas optimization techniques:
+
+### Adapter Caching
+
+```solidity RouterLogic.sol
+// Cache last used adapter to avoid repeated SLOAD operations
+bytes4 prevSelector;
+address adapter;
+
+if (selector != prevSelector) {
+    adapter = selector.withFillAdapter().adapterAddress();
+    prevSelector = selector;
+}
+// Saves ~2100 gas per cache hit
+```
+
+### Optimized Route Fill
+
+The `optimized_routeFill921336808` function provides enhanced performance:
+
+```solidity RouterLogic.sol
+function optimized_routeFill921336808(
+    bytes[] calldata relayerContexts,
+    bytes calldata encodedAdapterCalldatas,
+    bytes calldata atomicFillSignature
+) public payable virtual nonReentrant
+```
+
+**Optimizations:**
+
+- **Encoded Calldata Format** - Reduces calldata costs by ~200-500 gas per element
+- **Adapter Caching** - Reuses cached addresses for consecutive same-selector calls
+- **Special Selector Bypass** - Built-in selectors skip adapter lookup entirely
+- **Inline Assembly Decoding** - Operates directly on calldata without memory copying
+
+<Accordion title="Gas Savings Breakdown">
+  - **Adapter Cache Hit**: ~2,100 gas (avoids cold SLOAD)
+  - **Special Selector**: ~2,600+ gas (avoids SLOAD + DELEGATECALL overhead)
+  - **Encoded Calldata**: ~200-500 gas per operation
+  - **Assembly Decoding**: Saves memory expansion and copying costs
+</Accordion>
+
+## Role-Based Access Control
+
+The Router uses OpenZeppelin's AccessControl for adapter management:
+
+| Role | Address | Capabilities |
+|------|---------|-------------|
+| **ADD_ROLE** | `adder` | Install new adapters, apply hotfixes, set atomic fill signer, pause router |
+| **RM_ROLE** | `remover` | Retire problematic or deprecated adapters |
+
+```solidity RouterManager.sol
+constructor(address addAdmin, address rmAdmin) {
+    _grantRole(ADD_ROLE, addAdmin);
+    _grantRole(RM_ROLE, rmAdmin);
+}
+```
+
+## Configuration
+
+### Deployment Parameters
+
+<ParamField path="atomicFillSigner" type="address" required>
+  Address authorized to sign atomic fill batches. Must be non-zero for fills to function. Consider using hardware wallet or multi-sig.
+</ParamField>
+
+<ParamField path="adder" type="address" required>
+  Address granted `ADD_ROLE` for registering new protocol adapters. Should be a secure governance address.
+</ParamField>
+
+<ParamField path="remover" type="address" required>
+  Address granted `RM_ROLE` for disabling compromised adapters. Should be a secure operations address.
+</ParamField>
+
+### Example Deployment
+
+```solidity
+address atomicSigner = 0x1234...;
+address governance = 0x5678...;
+address operations = 0x9abc...;
+
+Router router = new Router(atomicSigner, governance, operations);
+```
+
+## Security Considerations
+
+<Warning>
+**Critical Security Points:**
+
+- The `atomicFillSigner` controls all user asset movements through fills
+- Adapter management roles should be assigned to secure governance/operations addresses
+- All addresses are immutable or role-protected after deployment
+- Reentrancy protection is enforced on all external functions
+</Warning>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Adapters" icon="plug" href="/concepts/adapters">
+    Learn about the adapter architecture and delegatecall pattern
+  </Card>
+  <Card title="Fill & Claim" icon="arrows-turn-to-dots" href="/concepts/fill-and-claim">
+    Understand fill and claim operation types
+  </Card>
+</CardGroup>

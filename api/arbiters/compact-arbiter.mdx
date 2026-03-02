@@ -1,0 +1,363 @@
+---
+title: 'CompactArbiter'
+description: 'Abstract base contract providing TheCompact protocol integration for cross-chain resource unlocking'
+icon: 'cubes'
+---
+
+## Overview
+
+CompactArbiter serves as the core integration layer with TheCompact's resource locking system, enabling arbiters to unlock tokens and assets that were previously locked on origin chains.
+
+<Info>
+  TheCompact is a protocol for cross-chain resource management where users can lock resources on one chain and later unlock them on another chain through cryptographic proofs and signatures.
+</Info>
+
+## Key Capabilities
+
+- **Multichain claims**: Unlocking resources when the current chain is the notarized chain
+- **Exogenous claims**: Unlocking resources when operating on a non-notarized chain
+- **Batch operations**: Efficient processing of multiple token unlocks in single transaction
+- **Signature validation**: EIP-712 compliant mandate verification for secure unlocking
+- **Cross-chain coordination**: Managing state transitions across multiple blockchain networks
+
+## Architecture
+
+The contract abstracts away the complexity of TheCompact's claim operations while providing standardized interfaces for settlement-specific arbiters to leverage resource unlocking.
+
+<Warning>
+  **Security**: All claim operations include sponsor validation to prevent unauthorized unlocking. Mandate hashes ensure cryptographic integrity of cross-chain operations. Failed claims revert transactions to maintain atomic settlement guarantees.
+</Warning>
+
+## Constructor
+
+```solidity
+constructor(address compact)
+```
+
+<ParamField path="compact" type="address" required>
+  The address of TheCompact claims contract that manages resource locks and unlocks. Must be a valid ITheCompactClaims implementation for the target network.
+</ParamField>
+
+<Danger>
+  The compact address cannot be changed after deployment. Ensure you provide the correct address during contract initialization.
+</Danger>
+
+## State Variables
+
+### CLAIM
+
+```solidity
+ITheCompactClaims internal immutable CLAIM;
+```
+
+TheCompact claims contract interface for unlocking locked resources. This is the core interface to TheCompact protocol for resource management.
+
+### STRING_MANDATE_STRIPPED
+
+```solidity
+string internal constant STRING_MANDATE_STRIPPED =
+    "Target target,uint128 minGas,Op originOps,Op destOps,bytes32 q)Op(bytes32 vt,Ops[] ops)Ops(address to,uint256 value,bytes data)Target(address recipient,Token[] tokenOut,uint256 targetChain,uint256 fillExpiry)Token(address token,uint256 amount";
+```
+
+EIP-712 typestring for mandate verification in TheCompact claims.
+
+<Info>
+  This is the witness typestring used by TheCompact for validating cross-chain mandates. The string defines the structure of the mandate data that gets hashed and signed. The "stripped" version excludes the leading "Mandate mandate)" portion as required by TheCompact.
+</Info>
+
+## Claim Functions
+
+### Notarized Chain Unlock
+
+```solidity
+function _unlockNotarizedChain(
+    Types.Order calldata order,
+    bytes32[] calldata otherElements,
+    bytes calldata originChainSig,
+    bytes memory allocatorData,
+    address depositor,
+    bytes32 mandateHash
+) internal returns (bytes32 claimHash)
+```
+
+Unlocks resources from TheCompact for orders originating from the notarized chain.
+
+<Info>
+  Handles the case where resources were locked on the chain where the order was notarized, and now need to be unlocked for cross-chain settlement. Uses batchMultichainClaim for standard cross-chain resource unlocking.
+</Info>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  The order containing token inputs and settlement details.
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]" required>
+  Additional chain elements for multi-chain validation.
+</ParamField>
+
+<ParamField path="originChainSig" type="bytes" required>
+  The signature from the origin chain authorizing the unlock.
+</ParamField>
+
+<ParamField path="allocatorData" type="bytes" required>
+  The allocator-specific data for resource allocation.
+</ParamField>
+
+<ParamField path="depositor" type="address" required>
+  The address that will receive the unlocked tokens.
+</ParamField>
+
+<ParamField path="mandateHash" type="bytes32" required>
+  The mandate hash for TheCompact validation.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="claimHash" type="bytes32">
+  The claim hash returned by TheCompact, used for tracking and validation.
+</ResponseField>
+
+#### Implementation
+
+The function handles both single and batch token unlocking:
+
+<Tabs>
+  <Tab title="Single Token">
+    For orders with a single token input, uses `multichainClaim` for gas efficiency:
+
+    ```solidity
+    if (tokenIn.length == 1) {
+        uint256 amount = tokenIn[0][1];
+        claimHash = CLAIM.multichainClaim(
+            MultichainClaim({
+                allocatorData: allocatorData,
+                sponsorSignature: originChainSig,
+                sponsor: sponsor,
+                nonce: order.nonce,
+                expires: order.expires,
+                witness: mandateHash,
+                witnessTypestring: STRING_MANDATE_STRIPPED,
+                additionalChains: otherElements,
+                claimants: SplitLib.toComponents(depositor, amount),
+                id: tokenIn[0][0],
+                allocatedAmount: amount
+            })
+        );
+    }
+    ```
+  </Tab>
+  <Tab title="Batch Tokens">
+    For orders with multiple tokens, uses `batchMultichainClaim`:
+
+    ```solidity
+    claimHash = CLAIM.batchMultichainClaim(
+        BatchMultichainClaim({
+            allocatorData: allocatorData,
+            sponsorSignature: originChainSig,
+            sponsor: sponsor,
+            nonce: order.nonce,
+            expires: order.expires,
+            witness: mandateHash,
+            witnessTypestring: STRING_MANDATE_STRIPPED,
+            additionalChains: otherElements,
+            claims: order.tokenIn.toSplit(depositor)
+        })
+    );
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Prevents the arbiter from being the sponsor with `require(sponsor != address(this), InvalidOrderData())` as a security check. Ensures the claim was successful with `require(claimHash != bytes32(0), ClaimFailed())`.
+</Warning>
+
+### Exogenous Chain Unlock
+
+```solidity
+function _unlockExogenousChain(
+    Types.Order calldata order,
+    bytes calldata originChainSig,
+    uint256 notarizedChainId,
+    uint256 chainIndex,
+    bytes32[] calldata otherElements,
+    bytes memory allocatorData,
+    address depositor,
+    bytes32 mandateHash
+) internal returns (bytes32 claimHash)
+```
+
+Unlocks resources from TheCompact for orders originating from external (non-notarized) chains.
+
+<Info>
+  Handles the case where resources were locked on a different chain than where the order was notarized. Uses exogenousBatchClaim for cross-chain resource unlocking where the current chain is not the notarized chain.
+</Info>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  The order containing token inputs and settlement details.
+</ParamField>
+
+<ParamField path="originChainSig" type="bytes" required>
+  The signature from the origin chain authorizing the unlock.
+</ParamField>
+
+<ParamField path="notarizedChainId" type="uint256" required>
+  The chain ID where the order was originally notarized.
+</ParamField>
+
+<ParamField path="chainIndex" type="uint256" required>
+  The index of the current chain in the cross-chain element array.
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]" required>
+  Additional chain elements for multi-chain validation.
+</ParamField>
+
+<ParamField path="allocatorData" type="bytes" required>
+  The allocator-specific data for resource allocation.
+</ParamField>
+
+<ParamField path="depositor" type="address" required>
+  The address that will receive the unlocked tokens.
+</ParamField>
+
+<ParamField path="mandateHash" type="bytes32" required>
+  The mandate hash for TheCompact validation.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="claimHash" type="bytes32">
+  The claim hash returned by TheCompact, used for tracking and validation.
+</ResponseField>
+
+#### Implementation
+
+Similar to notarized chain unlocking, handles both single and batch tokens:
+
+<Tabs>
+  <Tab title="Single Token">
+    ```solidity
+    if (tokenIn.length == 1) {
+        uint256 amount = tokenIn[0][1];
+        claimHash = CLAIM.exogenousClaim(
+            ExogenousMultichainClaim({
+                allocatorData: allocatorData,
+                sponsorSignature: originChainSig,
+                sponsor: sponsor,
+                nonce: order.nonce,
+                expires: order.expires,
+                witness: mandateHash,
+                witnessTypestring: STRING_MANDATE_STRIPPED,
+                additionalChains: otherElements,
+                chainIndex: chainIndex,
+                notarizedChainId: notarizedChainId,
+                claimants: SplitLib.toComponents(depositor, amount),
+                id: tokenIn[0][0],
+                allocatedAmount: amount
+            })
+        );
+    }
+    ```
+  </Tab>
+  <Tab title="Batch Tokens">
+    ```solidity
+    claimHash = CLAIM.exogenousBatchClaim(
+        ExogenousBatchMultichainClaim({
+            allocatorData: allocatorData,
+            sponsorSignature: originChainSig,
+            sponsor: order.sponsor,
+            nonce: order.nonce,
+            expires: order.expires,
+            witness: mandateHash,
+            witnessTypestring: STRING_MANDATE_STRIPPED,
+            additionalChains: otherElements,
+            chainIndex: chainIndex,
+            notarizedChainId: notarizedChainId,
+            claims: order.tokenIn.toSplit(depositor)
+        })
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Modifiers
+
+### requireOtherChain
+
+```solidity
+modifier requireOtherChain(Types.Order calldata order, uint256 notarizedChainId) {
+    require(order.targetOps.data.length == 0, InvalidOrderData());
+    require(notarizedChainId != block.chainid, InvalidOrderData());
+    _;
+}
+```
+
+Validates that an order is for cross-chain settlement.
+
+<Info>
+  Ensures the order doesn't have target operations (which would indicate same-chain execution) and that the notarized chain ID differs from the current chain.
+</Info>
+
+## Errors
+
+### ClaimFailed
+
+```solidity
+error ClaimFailed();
+```
+
+Thrown when a claim operation to TheCompact fails. This indicates that the unlock operation did not succeed, typically due to invalid signatures, expired claims, or insufficient locked resources.
+
+### InvalidOrderData
+
+```solidity
+error InvalidOrderData();
+```
+
+Thrown when order data is invalid or malformed. This can occur when:
+- Target operations are present in a cross-chain order
+- Notarized chain ID equals current chain ID for exogenous claims
+- Sponsor address is the arbiter contract itself
+
+## Events
+
+### ProcessedClaim
+
+```solidity
+event ProcessedClaim(
+    address indexed sponsor,
+    uint256 indexed nonce,
+    bytes32 indexed claimHash
+);
+```
+
+Emitted when a claim is successfully processed through TheCompact.
+
+<ParamField path="sponsor" type="address">
+  The address that sponsored the original order.
+</ParamField>
+
+<ParamField path="nonce" type="uint256">
+  The unique identifier of the processed order.
+</ParamField>
+
+<ParamField path="claimHash" type="bytes32">
+  The hash returned by TheCompact claim operations.
+</ParamField>
+
+## Gas Optimization
+
+<Tip>
+  Single vs batch claim operations are automatically selected based on token count:
+  - 1 token: Uses `multichainClaim` or `exogenousClaim` (lower gas)
+  - Multiple tokens: Uses `batchMultichainClaim` or `exogenousBatchClaim` (optimized batch processing)
+  
+  Immutable interface storage minimizes gas costs for repeated operations.
+</Tip>
+
+## Source Code Reference
+
+Location: `/src/base/arbiter/CompactArbiter/CompactArbiter.sol:46`

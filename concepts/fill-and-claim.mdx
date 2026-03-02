@@ -1,0 +1,529 @@
+---
+title: Fill and Claim Operations
+description: Understanding fill and claim operation types in the Router ecosystem
+---
+
+## Overview
+
+The Router supports two fundamental operation types: **Fill** and **Claim**. These operations enable different settlement patterns with distinct security models and use cases.
+
+<Note>
+Fill operations require atomic signature authorization, while claim operations rely on protocol-level authorization already validated by the underlying protocol.
+</Note>
+
+## Operation Types
+
+<CardGroup cols={2}>
+  <Card title="Fill Operations" icon="arrow-right-arrow-left">
+    Settlement operations that fulfill user orders by transferring assets and executing target operations. Require atomic signature from authorized signer.
+  </Card>
+  <Card title="Claim Operations" icon="unlock">
+    Resource unlock operations that claim user assets from protocols. Execute without atomic signatures as they rely on protocol-level authorization.
+  </Card>
+</CardGroup>
+
+## Fill Operations
+
+Fill operations represent settlement transactions where a solver fulfills a user's order:
+
+### Architecture
+
+```solidity RouterLogic.sol
+function optimized_routeFill921336808(
+    bytes[] calldata relayerContexts,
+    bytes calldata encodedAdapterCalldatas,
+    bytes calldata atomicFillSignature
+) public payable virtual nonReentrant {
+    // Compute hash of encoded calldata
+    bytes32 hash = encodedAdapterCalldatas.hashCalldata();
+    
+    // Validate atomic signature
+    require(_isAtomic(hash, atomicFillSignature), IRouter.InvalidAtomicity());
+    
+    // Process each operation with adapter caching
+    for (uint256 i; i < length;) {
+        bytes calldata adapterCalldata = adapterCalldatas[i];
+        bytes4 selector = bytes4(adapterCalldata[:4]);
+        
+        // Route to adapter or handle special selectors
+        if (!_processDirectFillRoute(selector, adapterCalldata)) {
+            // Regular adapter call with relayer context
+            require(
+                selector == adapter.callAdapterWithRelayerContext(
+                    relayerContexts[relayerContextIndex],
+                    adapterCalldata
+                ),
+                IRouter.AdapterCallFailed()
+            );
+            unchecked { ++relayerContextIndex; }
+        }
+        unchecked { ++i; }
+    }
+}
+```
+
+### Atomic Signature Security
+
+The atomic fill signer prevents unauthorized operation execution:
+
+```solidity RouterLogic.sol
+function _isAtomic(bytes32 hash, bytes calldata atomicSig) 
+    internal virtual returns (bool atomic) 
+{
+    address signer = $atomicFillSigner;
+    require(signer != address(0), IRouter.AtomicSignerNotSet());
+    
+    // Verify signature came from authorized signer
+    atomic = (signer == ECDSA.recoverCalldata(hash, atomicSig));
+}
+```
+
+<Warning>
+**Security Model:**
+
+- Only the designated `atomicFillSigner` can authorize fill batches
+- Each signature is bound to specific calldata via hash
+- Prevents unauthorized solvers from executing user operations
+- Setting signer to `address(0)` pauses all fill operations
+</Warning>
+
+### Fill Flow Example
+
+Same-chain Compact fill operation:
+
+<Steps>
+  <Step title="Solver Submits Fill">
+    ```solidity
+    router.optimized_routeFill921336808(
+        relayerContexts,      // [tokenInRecipient]
+        encodedAdapterCalldatas,  // [samechain_compact_handleFill calldata]
+        atomicFillSignature   // Signature from atomicFillSigner
+    );
+    ```
+  </Step>
+  <Step title="Router Validates Signature">
+    ```solidity
+    bytes32 hash = encodedAdapterCalldatas.hashCalldata();
+    require(_isAtomic(hash, atomicFillSignature));
+    ```
+  </Step>
+  <Step title="Router Delegates to Adapter">
+    ```solidity
+    adapter.callAdapterWithRelayerContext(
+        relayerContext,
+        adapterCalldata
+    );
+    ```
+  </Step>
+  <Step title="Adapter Pre-Funds Recipient">
+    ```solidity
+    _prefundRecipient({
+        from: msg.sender,  // Solver
+        to: order.recipient,
+        tokenOut: order.tokenOut
+    });
+    ```
+  </Step>
+  <Step title="Arbiter Validates & Unlocks">
+    ```solidity
+    SameChainArbiter.handleCompact_NotarizedChain({
+        order: order,
+        sigs: userSigs,
+        relayer: tokenInRecipient  // From relayer context
+    });
+    ```
+  </Step>
+  <Step title="Execute Target Operations">
+    ```solidity
+    EXECUTOR.executeOpsWithoutSignature(
+        order.recipient,
+        order.targetOps
+    );
+    ```
+  </Step>
+</Steps>
+
+### Fill Operation Security
+
+<Tabs>
+  <Tab title="Authorization Layers">
+    ```solidity
+    1. Atomic Fill Signature
+       ↓
+       Validates entire batch from Router perspective
+       
+    2. User Signatures (in arbiter)
+       ↓
+       Validates individual orders from user perspective
+       
+    3. Protocol Authorization
+       ↓
+       Compact/Permit2 validates token movements
+    ```
+  </Tab>
+  <Tab title="Replay Protection">
+    ```solidity
+    // Atomic signature bound to specific calldata
+    bytes32 hash = keccak256(encodedAdapterCalldatas);
+    
+    // User nonces prevent replay of orders
+    order.nonce  // Unique per user per order
+    
+    // Deadline enforcement
+    require(order.fillDeadline >= block.timestamp);
+    ```
+  </Tab>
+  <Tab title="Atomicity Guarantees">
+    ```solidity
+    // All operations succeed or entire batch reverts:
+    
+    ✅ Pre-funding succeeds
+    ✅ Signature validation passes
+    ✅ Resource unlock succeeds
+    ✅ Target operations execute
+    
+    // If ANY step fails:
+    ❌ Entire transaction reverts
+    ❌ No partial state changes persist
+    ```
+  </Tab>
+</Tabs>
+
+## Claim Operations
+
+Claim operations unlock user resources from protocols without requiring atomic signatures:
+
+### Architecture
+
+```solidity RouterLogic.sol
+function routeClaim(
+    bytes[] calldata relayerContexts,
+    bytes[] calldata adapterCalldatas
+) external payable nonReentrant {
+    // No atomic signature validation required
+    
+    uint256 length = adapterCalldatas.length;
+    uint256 relayerContextIndex;
+    bytes4 prevSelector;
+    address adapter;
+    
+    for (uint256 i; i < length;) {
+        bytes calldata adapterCalldata = adapterCalldatas[i];
+        bytes4 selector = bytes4(adapterCalldata[:4]);
+        
+        // Handle special selectors or route to adapter
+        if (!_processDirectClaimRoute(selector, adapterCalldata)) {
+            if (selector != prevSelector) {
+                adapter = selector.withClaimAdapter().adapterAddress();
+                prevSelector = selector;
+            }
+            
+            require(
+                selector == adapter.callAdapterWithRelayerContext(
+                    relayerContexts[relayerContextIndex],
+                    adapterCalldata
+                ),
+                IRouter.AdapterCallFailed()
+            );
+            unchecked { ++relayerContextIndex; }
+        }
+        unchecked { ++i; }
+    }
+}
+```
+
+### Claim vs Fill
+
+<Tabs>
+  <Tab title="Security Model">
+    | Aspect | Fill | Claim |
+    |--------|------|-------|
+    | **Atomic Signature** | Required ✅ | Not required ❌ |
+    | **Protocol Auth** | Compact/Permit2 sigs | Compact/Permit2 sigs |
+    | **Use Case** | Settlement fulfillment | Resource unlocking |
+    | **Initiator** | Solver | User or solver |
+  </Tab>
+  <Tab title="Entry Points">
+    ```solidity
+    // Fill operations - require atomic signature
+    router.optimized_routeFill921336808(
+        relayerContexts,
+        encodedAdapterCalldatas,
+        atomicFillSignature  // ✅ Required
+    );
+    
+    // Claim operations - no atomic signature
+    router.routeClaim(
+        relayerContexts,
+        adapterCalldatas  // ❌ No signature
+    );
+    ```
+  </Tab>
+  <Tab title="Authorization">
+    ```solidity
+    // Fill: Dual authorization
+    1. Atomic signer authorizes batch
+    2. User authorizes specific order
+    
+    // Claim: Single authorization  
+    1. User authorizes claim via protocol signature
+    ```
+  </Tab>
+</Tabs>
+
+### Single Claim Operation
+
+For individual claim operations:
+
+```solidity RouterLogic.sol
+function routeClaim(
+    bytes calldata relayerContext,
+    bytes calldata adapterCalldata
+) public payable nonReentrant {
+    bytes4 selector = bytes4(adapterCalldata[:4]);
+    
+    // Handle special selectors or route to adapter
+    if (!_processDirectClaimRoute(selector, adapterCalldata)) {
+        address adapter = selector.withClaimAdapter().adapterAddress();
+        require(
+            selector == adapter.callAdapterWithRelayerContext(
+                relayerContext,
+                adapterCalldata
+            ),
+            IRouter.AdapterCallFailed()
+        );
+    }
+}
+```
+
+<Info>
+Single claim operations are optimized for gas efficiency when only one claim is needed.
+</Info>
+
+## Batch Processing
+
+Both fill and claim operations support atomic batch execution:
+
+### Batch Atomicity
+
+```solidity
+// All operations in batch must succeed
+for (uint256 i; i < length;) {
+    // Execute operation i
+    require(success, AdapterCallFailed());
+    unchecked { ++i; }
+}
+
+// If any operation fails:
+// - Entire batch reverts
+// - No partial state changes
+// - All gas consumed up to failure point
+```
+
+### Relayer Context Consumption
+
+```solidity RouterLogic.sol
+// Each regular adapter call consumes one relayer context
+uint256 relayerContextIndex;
+
+for (uint256 i; i < length;) {
+    if (!isSpecialSelector) {
+        // Regular adapter call - consume context
+        adapter.callAdapterWithRelayerContext(
+            relayerContexts[relayerContextIndex],
+            adapterCalldata
+        );
+        unchecked { ++relayerContextIndex; }
+    }
+    // Special selectors don't consume contexts
+    unchecked { ++i; }
+}
+
+// Validate all contexts were consumed
+require(relayerContextsLength == relayerContextIndex, LengthMismatch());
+```
+
+<Warning>
+**Context Validation:**
+
+The Router validates that the number of relayer contexts matches the number of regular adapter calls. Special selectors (singleCall, multiCall, fee collection) don't consume contexts.
+</Warning>
+
+## Special Selectors
+
+Both fill and claim operations support special selectors that bypass adapter lookup:
+
+```solidity DirectRoutes.sol
+function _processDirectFillRoute(
+    bytes4 selector,
+    bytes calldata data
+) internal returns (bool processed) {
+    if (selector == this.singleCall.selector) {
+        // Handle single call directly
+        processed = true;
+    } else if (selector == this.multiCall.selector) {
+        // Handle multi call directly
+        processed = true;
+    } else if (selector == this.collectFees.selector) {
+        // Handle fee collection directly
+        processed = true;
+    }
+    // Returns false for regular adapters
+}
+```
+
+**Benefits:**
+
+<CardGroup cols={3}>
+  <Card title="Gas Savings" icon="gauge-high">
+    Saves ~2,600+ gas by avoiding SLOAD and DELEGATECALL overhead
+  </Card>
+  <Card title="No Context" icon="ban">
+    Special selectors don't consume relayer contexts
+  </Card>
+  <Card title="Built-in" icon="code">
+    Common operations handled natively by Router
+  </Card>
+</CardGroup>
+
+## Gas Optimizations
+
+### Adapter Caching
+
+```solidity RouterLogic.sol
+bytes4 prevSelector;
+address adapter;
+
+for (uint256 i; i < length;) {
+    bytes4 selector = bytes4(adapterCalldata[:4]);
+    
+    if (selector != prevSelector) {
+        // Cache miss - load adapter from storage
+        adapter = selector.withFillAdapter().adapterAddress();
+        prevSelector = selector;
+    }
+    // Cache hit - reuse adapter (saves ~2,100 gas)
+    
+    adapter.callAdapter(adapterCalldata);
+}
+```
+
+### Encoded Calldata (Fill Only)
+
+```solidity
+// Traditional approach:
+function routeFill(bytes[] calldata calldatas) {
+    // Decodes array immediately (~200-500 gas per element)
+}
+
+// Optimized approach:
+function optimized_routeFill921336808(
+    bytes calldata encodedAdapterCalldatas
+) {
+    // Decode using assembly - operates on calldata directly
+    assembly {
+        let o := add(encodedAdapterCalldatas.offset, calldataload(...))
+        adapterCalldatas.offset := add(o, 0x20)
+        length := calldataload(o)
+    }
+}
+```
+
+### Context Tracking
+
+```solidity
+// Efficient context consumption tracking
+uint256 relayerContextIndex;
+
+if (!isSpecialSelector) {
+    // Regular adapter - consume context
+    unchecked { ++relayerContextIndex; }
+}
+// No increment for special selectors
+```
+
+## Use Cases
+
+<Tabs>
+  <Tab title="Fill Use Cases">
+    **Cross-Chain Settlement**
+    - User swaps ETH on Ethereum for USDC on Arbitrum
+    - Solver fills order by providing USDC on Arbitrum
+    - Solver claims ETH on Ethereum after settlement
+    
+    **Same-Chain Settlement**
+    - User swaps USDC for DAI on same chain
+    - Solver pre-funds DAI to recipient
+    - Solver claims USDC after arbiter validation
+    
+    **Intent Execution**
+    - User authorizes multi-step operations
+    - Solver executes operations via IntentExecutor
+    - Solver receives compensation after execution
+  </Tab>
+  <Tab title="Claim Use Cases">
+    **Resource Unlocking**
+    - User claims locked tokens from Compact
+    - User withdraws from time-locked contract
+    - User collects yield from protocol
+    
+    **Post-Settlement Claims**
+    - Solver claims input tokens after filling order
+    - User claims refunds from failed operations
+    - Protocol claims fees from settlements
+    
+    **Independent Claims**
+    - Claims not tied to active settlements
+    - User-initiated resource unlocking
+    - Automated claim processing
+  </Tab>
+</Tabs>
+
+## Error Handling
+
+### Fill Errors
+
+```solidity
+error InvalidAtomicity();      // Atomic signature invalid
+error AtomicSignerNotSet();    // Signer is address(0)
+error AdapterCallFailed();     // Adapter execution failed
+error LengthMismatch();        // Context/calldata length mismatch
+```
+
+### Claim Errors
+
+```solidity
+error AdapterCallFailed();     // Adapter execution failed
+error LengthMismatch();        // Context/calldata length mismatch
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Fill for Settlements" icon="arrow-right-arrow-left">
+    When solvers are fulfilling user orders, always use fill operations with atomic signatures for security.
+  </Card>
+  <Card title="Use Claim for Unlocks" icon="unlock">
+    When users or solvers are unlocking resources without settlement context, use claim operations.
+  </Card>
+  <Card title="Batch Operations" icon="layer-group">
+    Combine multiple operations into atomic batches to ensure all-or-nothing execution.
+  </Card>
+  <Card title="Context Management" icon="database">
+    Ensure relayer context array length matches number of regular adapter calls (excluding special selectors).
+  </Card>
+</CardGroup>
+
+## Related Concepts
+
+<CardGroup cols={3}>
+  <Card title="Router System" icon="route" href="/concepts/router-system">
+    Learn about Router architecture and operation routing
+  </Card>
+  <Card title="Adapters" icon="plug" href="/concepts/adapters">
+    Understand adapter architecture and delegatecall pattern
+  </Card>
+  <Card title="Arbiters" icon="scale-balanced" href="/concepts/arbiters">
+    Learn about arbiter layer and settlement validation
+  </Card>
+</CardGroup>

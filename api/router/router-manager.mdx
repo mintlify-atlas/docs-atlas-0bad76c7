@@ -1,0 +1,418 @@
+---
+title: "RouterManager"
+description: "Advanced router management contract with semantic versioning support"
+---
+
+## Overview
+
+RouterManager manages adapter installations, upgrades, and access control for the routing system. It supports both fill and claim adapters with semantic version validation for safe upgrades.
+
+**Key Features:**
+- Role-based access control for adapter management
+- Semantic version validation for adapter upgrades
+- Separate storage for fill and claim adapters
+- Hotfix support with patch-only upgrade validation
+- Atomic fill signer management with pause functionality
+
+## Roles
+
+### ADD_ROLE
+
+```solidity
+bytes32 internal constant ADD_ROLE = bytes32(uint256(0x1001))
+```
+
+Role for adding new routes and setting the atomic fill signer. Holders of this role can install new adapters, perform hotfixes, and pause the router.
+
+### RM_ROLE
+
+```solidity
+bytes32 internal constant RM_ROLE = bytes32(uint256(0x1002))
+```
+
+Role for retiring existing routes.
+
+## State Variables
+
+### $atomicFillSigner
+
+```solidity
+address public $atomicFillSigner
+```
+
+The address of the signer authorized for atomic fills. When set to `address(0)`, atomic fills are effectively paused.
+
+### initialized
+
+```solidity
+bool public initialized
+```
+
+Flag indicating whether the contract has been initialized (for proxy pattern).
+
+## Functions
+
+### initialize
+
+Initializes the contract when used with a proxy.
+
+```solidity
+function initialize(
+    address atomicSigner,
+    address addAdmin,
+    address rmAdmin
+) external onlyProxyOwner
+```
+
+<ParamField path="atomicSigner" type="address">
+  The address to set as the atomic fill signer.
+</ParamField>
+
+<ParamField path="addAdmin" type="address">
+  The address to be granted the ADD_ROLE.
+</ParamField>
+
+<ParamField path="rmAdmin" type="address">
+  The address to be granted the RM_ROLE.
+</ParamField>
+
+This function can only be called once.
+
+### pauseRouter
+
+Pauses atomic fills by setting the atomic fill signer to the zero address.
+
+```solidity
+function pauseRouter() external onlyRole(ADD_ROLE)
+```
+
+<Warning>
+This function pauses all fill operations by setting the atomic fill signer to address(0). Only callable by addresses with ADD_ROLE.
+</Warning>
+
+### setAtomicFillSigner
+
+Sets a new atomic fill signer address.
+
+```solidity
+function setAtomicFillSigner(address newSigner) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="newSigner" type="address">
+  The new address to set as the atomic fill signer.
+</ParamField>
+
+<Warning>
+Changing the atomic fill signer affects all fill operations. Only callable by addresses with ADD_ROLE.
+</Warning>
+
+### installFillAdapter
+
+Installs a new fill adapter for a specific version and selector.
+
+```solidity
+function installFillAdapter(
+    bytes2 protocolVersion,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="protocolVersion" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the adapter contract to install.
+</ParamField>
+
+**Requirements:**
+- Caller must have ADD_ROLE
+- No adapter must be currently installed for this version/selector
+- Adapter must have the same major version as the specified version parameter
+- Adapter must implement the required interface and pass validation
+
+### hotfixFillAdapter
+
+Applies a hotfix to an existing fill adapter.
+
+```solidity
+function hotfixFillAdapter(
+    bytes2 version,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the new adapter contract for the hotfix.
+</ParamField>
+
+**Requirements:**
+- Caller must have ADD_ROLE
+- An adapter must already be installed for this version/selector
+- New adapter version must be only a patch upgrade (no major/minor changes)
+- New adapter must implement the required interface and pass validation
+
+This function enforces semantic versioning rules to ensure safe upgrades.
+
+<Warning>
+Validates that the new version is only a patch upgrade to prevent breaking changes.
+</Warning>
+
+### forceHotfixFillAdapter
+
+Forces a hotfix to an existing fill adapter without semantic versioning restrictions.
+
+```solidity
+function forceHotfixFillAdapter(
+    bytes2 version,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the new adapter contract for the hotfix.
+</ParamField>
+
+<Warning>
+This function bypasses semantic versioning validation and can introduce breaking changes. Use with extreme caution.
+</Warning>
+
+### installClaimAdapter
+
+Installs a new claim adapter for a specific version and selector.
+
+```solidity
+function installClaimAdapter(
+    bytes2 version,
+    bytes4 selector,
+    address adapter
+) public onlyRole(ADD_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the adapter contract to install.
+</ParamField>
+
+**Requirements:**
+- Caller must have ADD_ROLE
+- No adapter must be currently installed for this version/selector
+- Adapter must have the same major version as the specified version parameter
+- Adapter must implement the required interface and pass validation
+
+### hotfixClaimAdapter
+
+Applies a hotfix to an existing claim adapter.
+
+```solidity
+function hotfixClaimAdapter(
+    bytes2 version,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the new adapter contract for the hotfix.
+</ParamField>
+
+**Requirements:**
+- Caller must have ADD_ROLE
+- An adapter must already be installed for this version/selector
+- New adapter version must be only a patch upgrade (no major/minor changes)
+- New adapter must implement the required interface and pass validation
+
+<Warning>
+Enforces semantic versioning rules to ensure only patch upgrades are applied.
+</Warning>
+
+### forceHotfixClaimAdapter
+
+Forces a hotfix to an existing claim adapter without semantic versioning restrictions.
+
+```solidity
+function forceHotfixClaimAdapter(
+    bytes2 version,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+<ParamField path="adapter" type="address">
+  The address of the new adapter contract for the hotfix.
+</ParamField>
+
+<Warning>
+Bypasses semantic versioning validation and can introduce breaking changes. Use with extreme caution.
+</Warning>
+
+### getFillAdapter
+
+Retrieves the fill adapter configuration for a specific version and selector.
+
+```solidity
+function getFillAdapter(
+    bytes2 version,
+    bytes4 selector
+) external view returns (address adapter, bytes12 adapterTag)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+**Returns:**
+- `adapter` (address): The address of the installed fill adapter (address(0) if none)
+- `adapterTag` (bytes12): The metadata tag associated with the adapter
+
+### getClaimAdapter
+
+Retrieves the claim adapter configuration for a specific version and selector.
+
+```solidity
+function getClaimAdapter(
+    bytes2 version,
+    bytes4 selector
+) external view returns (address adapter, bytes12 adapterTag)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector that the adapter implements.
+</ParamField>
+
+**Returns:**
+- `adapter` (address): The address of the installed claim adapter (address(0) if none)
+- `adapterTag` (bytes12): The metadata tag associated with the adapter
+
+### retireFillAdapter
+
+Retires (removes) an existing fill adapter.
+
+```solidity
+function retireFillAdapter(
+    bytes2 version,
+    bytes4 selector
+) external onlyRole(RM_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter to retire (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector of the adapter to retire.
+</ParamField>
+
+**Requirements:**
+- Caller must have RM_ROLE
+- An adapter must be installed for this version/selector combination
+
+Removes a previously installed fill adapter, making it unavailable for routing. This action is irreversible for the specific version/selector combination.
+
+### retireClaimAdapter
+
+Retires (removes) an existing claim adapter.
+
+```solidity
+function retireClaimAdapter(
+    bytes2 version,
+    bytes4 selector
+) external onlyRole(RM_ROLE)
+```
+
+<ParamField path="version" type="bytes2">
+  The semantic version of the adapter to retire (2 bytes).
+</ParamField>
+
+<ParamField path="selector" type="bytes4">
+  The function selector of the adapter to retire.
+</ParamField>
+
+**Requirements:**
+- Caller must have RM_ROLE
+- An adapter must be installed for this version/selector combination
+
+Removes a previously installed claim adapter, making it unavailable for routing. This action is irreversible for the specific version/selector combination.
+
+### setTokenApproval
+
+Sets token approval for an adapter's settlement layer spender.
+
+```solidity
+function setTokenApproval(
+    address adapter,
+    address token,
+    uint256 amount
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="adapter" type="address">
+  The adapter contract address.
+</ParamField>
+
+<ParamField path="token" type="address">
+  The token address to approve.
+</ParamField>
+
+<ParamField path="amount" type="uint256">
+  The approval amount.
+</ParamField>
+
+**Requirements:**
+- Caller must have ADD_ROLE
+- Adapter must have a valid settlement layer spender
+- Token address must be non-zero

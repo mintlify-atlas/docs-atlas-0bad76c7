@@ -1,0 +1,466 @@
+---
+title: "StandaloneIntentExecutor"
+description: "Executor contract for standalone multi-chain intent execution without external protocols"
+---
+
+## Overview
+
+The `StandaloneIntentExecutor` enables self-contained intent execution without dependencies on external protocols like Compact or Permit2.
+
+**Source:** `/src/executor/StandaloneIntent/StandaloneIntent.sol:50`
+
+### Key Features
+
+- **Chain-Agnostic Signatures**: Multi-chain operations with signatures valid across networks
+- **Direct Nonce Management**: Account-level replay protection without external protocols
+- **Gas Refund Support**: Optional ERC20 or native ETH relayer compensation
+- **Session Key Support**: Integration with emissary-based validation for delegation
+- **Single and Multi-Chain**: Optimized execution paths for both use cases
+
+### Execution Modes
+
+**Multi-Chain Operations**:
+- Chain-agnostic signatures work across different networks
+- Coordinated execution with operation hashes from other chains
+
+**Single-Chain Operations**:
+- Chain-specific signatures (more gas efficient)
+- Simplified execution for operations on one chain
+
+**Gas Refund Variants**:
+- No refund: Simple execution without relayer compensation
+- ERC20 refund: Pay relayer in any ERC20 token with configurable exchange rate
+- ETH refund: Optimized native ETH compensation (1:1 rate)
+
+## Structs
+
+### MultiChainOps
+
+Multi-chain operations structure for standalone intent execution.
+
+```solidity
+struct MultiChainOps {
+    address account;
+    uint256 chainIndex;
+    bytes32[] otherChains;
+    uint256 nonce;
+    Types.Operation ops;
+    bytes signature;
+}
+```
+
+<ParamField path="account" type="address">
+  The account address that owns and signed these operations
+</ParamField>
+
+<ParamField path="chainIndex" type="uint256">
+  Index position of current chain in the otherChains array
+</ParamField>
+
+<ParamField path="otherChains" type="bytes32[]">
+  Array of operation hashes from other chains in the multi-chain intent
+</ParamField>
+
+<ParamField path="nonce" type="uint256">
+  Nonce for replay protection
+</ParamField>
+
+<ParamField path="ops" type="Types.Operation">
+  Operations to execute on the current chain
+</ParamField>
+
+<ParamField path="signature" type="bytes">
+  EIP-712 signature from the account authorizing all operations
+</ParamField>
+
+### SingleChainOps
+
+Single-chain operations structure for standalone intent execution.
+
+```solidity
+struct SingleChainOps {
+    address account;
+    uint256 nonce;
+    Types.Operation ops;
+    bytes signature;
+}
+```
+
+<ParamField path="account" type="address">
+  The account address that owns and signed these operations
+</ParamField>
+
+<ParamField path="nonce" type="uint256">
+  Nonce for replay protection
+</ParamField>
+
+<ParamField path="ops" type="Types.Operation">
+  Operations to execute on the current chain
+</ParamField>
+
+<ParamField path="signature" type="bytes">
+  EIP-712 signature from the account authorizing the operations
+</ParamField>
+
+<Note>
+  SingleChainOps is ~850 gas cheaper than MultiChainOps due to simpler structure and standard EIP-712 hashing with chain ID.
+</Note>
+
+### GasRefund
+
+Gas refund parameters for ERC20 token relayer compensation.
+
+```solidity
+struct GasRefund {
+    address token;
+    uint256 exchangeRate;
+    uint256 overhead;
+}
+```
+
+<ParamField path="token" type="address">
+  ERC20 token address for gas refund (must not be Constants.NATIVE_TOKEN)
+</ParamField>
+
+<ParamField path="exchangeRate" type="uint256">
+  Exchange rate: how many token units equal 1 ETH (scaled to 1e18)
+</ParamField>
+
+<ParamField path="overhead" type="uint256">
+  Fixed gas overhead to add to the gas calculation (gas units)
+</ParamField>
+
+<Warning>
+  For ERC20 refunds, the token address must NOT be Constants.NATIVE_TOKEN. Use the ETH refund functions for native token compensation.
+</Warning>
+
+## Functions
+
+### executeMultichainOps
+
+```solidity
+function executeMultichainOps(MultiChainOps calldata signedOps) external
+```
+
+Executes a batch of multi-chain operations after verifying signature and nonce, without gas refund.
+
+<ParamField path="signedOps" type="MultiChainOps" required>
+  The MultiChainOps struct containing account, operations, nonce, and signature
+</ParamField>
+
+<Note>
+  Uses chain-agnostic EIP-712 signature validation (excludes chain ID from digest), allowing the same signature to be valid across different chains.
+</Note>
+
+### executeMultichainOpsWithGasRefund_ERC20
+
+```solidity
+function executeMultichainOpsWithGasRefund_ERC20(
+    MultiChainOps calldata signedOps,
+    GasRefund calldata gasRefund,
+    address gasRefundRecipient
+) external returns (address account, uint256 nonce)
+```
+
+Executes multi-chain operations with ERC20 token gas refund for relayer compensation.
+
+<ParamField path="signedOps" type="MultiChainOps" required>
+  The complete multi-chain operations structure with signature
+</ParamField>
+
+<ParamField path="gasRefund" type="GasRefund" required>
+  The gas refund terms (ERC20 token, exchange rate, and overhead)
+</ParamField>
+
+<ParamField path="gasRefundRecipient" type="address" required>
+  Address that will receive the gas refund payment (typically relayer)
+</ParamField>
+
+**Returns:**
+- `account` (address): The account address that executed the operations
+- `nonce` (uint256): The nonce that was consumed during execution
+
+<Warning>
+  Session key modes (EMISSARY_EXECUTION) require the account to call Paymaster.callbackAllowMaxAmount during execution to cap the refund amount and prevent exchange rate manipulation.
+</Warning>
+
+### executeMultichainOpsWithGasRefund_ETH
+
+```solidity
+function executeMultichainOpsWithGasRefund_ETH(
+    MultiChainOps calldata signedOps,
+    uint256 overhead,
+    address gasRefundRecipient
+) external returns (address account, uint256 nonce)
+```
+
+Executes multi-chain operations with native ETH gas refund for relayer compensation.
+
+<ParamField path="signedOps" type="MultiChainOps" required>
+  The complete multi-chain operations structure with signature
+</ParamField>
+
+<ParamField path="overhead" type="uint256" required>
+  The fixed gas overhead to add to the refund calculation (gas units)
+</ParamField>
+
+<ParamField path="gasRefundRecipient" type="address" required>
+  Address that will receive the gas refund payment (typically relayer)
+</ParamField>
+
+**Returns:**
+- `account` (address): The account address that executed the operations
+- `nonce` (uint256): The nonce that was consumed during execution
+
+<Tip>
+  Owner signature modes save ~17-22k gas vs ERC20 variant by skipping the Paymaster intermediary and using direct ETH transfer. Exchange rate is hardcoded to 1:1.
+</Tip>
+
+### executeSinglechainOps
+
+```solidity
+function executeSinglechainOps(SingleChainOps calldata signedOps) external
+```
+
+Executes a single-chain intent after signature validation without gas refund.
+
+<ParamField path="signedOps" type="SingleChainOps" required>
+  The complete single-chain operations structure with signature
+</ParamField>
+
+<Note>
+  Uses standard chain-specific EIP-712 signature validation (includes chain ID), making signatures NOT valid across different chains but ~850 gas cheaper than multi-chain variant.
+</Note>
+
+### executeSinglechainOpsWithGasRefund_ERC20
+
+```solidity
+function executeSinglechainOpsWithGasRefund_ERC20(
+    SingleChainOps calldata signedOps,
+    GasRefund calldata gasRefund,
+    address gasRefundRecipient
+) external returns (address account, uint256 nonce)
+```
+
+Executes single-chain operations with ERC20 token gas refund for relayer compensation.
+
+<ParamField path="signedOps" type="SingleChainOps" required>
+  The complete single-chain operations structure with signature
+</ParamField>
+
+<ParamField path="gasRefund" type="GasRefund" required>
+  The gas refund terms (ERC20 token, exchange rate, and overhead)
+</ParamField>
+
+<ParamField path="gasRefundRecipient" type="address" required>
+  Address that will receive the gas refund payment (typically relayer)
+</ParamField>
+
+**Returns:**
+- `account` (address): The account address that executed the operations
+- `nonce` (uint256): The nonce that was consumed during execution
+
+### executeSinglechainOpsWithGasRefund_ETH
+
+```solidity
+function executeSinglechainOpsWithGasRefund_ETH(
+    SingleChainOps calldata signedOps,
+    uint256 overhead,
+    address gasRefundRecipient
+) external returns (address account, uint256 nonce)
+```
+
+Executes single-chain operations with native ETH gas refund for relayer compensation.
+
+<ParamField path="signedOps" type="SingleChainOps" required>
+  The complete single-chain operations structure with signature
+</ParamField>
+
+<ParamField path="overhead" type="uint256" required>
+  The fixed gas overhead to add to the refund calculation (gas units)
+</ParamField>
+
+<ParamField path="gasRefundRecipient" type="address" required>
+  Address that will receive the gas refund payment (typically relayer)
+</ParamField>
+
+**Returns:**
+- `account` (address): The account address that executed the operations
+- `nonce` (uint256): The nonce that was consumed during execution
+
+### isStandaloneIntentNonceConsumed
+
+```solidity
+function isStandaloneIntentNonceConsumed(
+    uint256 nonce,
+    address account
+) external view returns (bool used)
+```
+
+Checks if a nonce has been used for a specific account.
+
+<ParamField path="nonce" type="uint256" required>
+  The nonce value to check
+</ParamField>
+
+<ParamField path="account" type="address" required>
+  The account address that owns the nonce
+</ParamField>
+
+**Returns:** `bool` - True if the nonce has been consumed, false otherwise
+
+### getCostInToken
+
+```solidity
+function getCostInToken(
+    uint256 _actualGasCost,
+    uint256 _actualOpFeePerGas,
+    uint256 _exchangeRate,
+    uint256 _overhead
+) public pure returns (uint256)
+```
+
+Converts gas costs from wei to token amount using an exchange rate.
+
+<ParamField path="_actualGasCost" type="uint256" required>
+  The total wei spent on execution (gasUsed × tx.gasprice)
+</ParamField>
+
+<ParamField path="_actualOpFeePerGas" type="uint256" required>
+  The current gas price in wei (tx.gasprice)
+</ParamField>
+
+<ParamField path="_exchangeRate" type="uint256" required>
+  How many token units (in token decimals) equal 1 ETH (1e18 wei)
+</ParamField>
+
+<ParamField path="_overhead" type="uint256" required>
+  The fixed gas overhead to add (gas units not captured by gasleft measurement)
+</ParamField>
+
+**Returns:** `uint256` - The gas cost denominated in tokens
+
+**Formula:** `((actualGasCost + (overhead × gasPrice)) × exchangeRate) / 1e18`
+
+## Gas Refund Mechanism
+
+### Settlement Methods
+
+The contract uses different settlement methods based on signature mode:
+
+**Owner Signature Modes** (EMISSARY, ERC1271, EMISSARY_ERC1271, ERC1271_EMISSARY):
+- ERC20: Via Paymaster.settleGasRefund
+- ETH: Direct transfer via executeSingleETHTransfer (~17-22k gas savings)
+- Trusted exchange rate from account owner
+
+**Session Key Modes** (EMISSARY_EXECUTION, EMISSARYEXECUTION_ERC1271, ERC1271_EMISSARYEXECUTION):
+- ERC20: Via Paymaster.settleGasRefund_requireCallback
+- ETH: Via Paymaster.settleGasRefund_requireCallback
+- Requires callback protection to prevent exchange rate/overhead manipulation
+
+### Session Key Security
+
+<Warning>
+  Session key modes require the account to call `Paymaster.callbackAllowMaxAmount` during execution to authorize the maximum refund amount. This prevents session keys from draining funds through inflated exchange rates or overhead values.
+</Warning>
+
+### Gas Overhead
+
+The contract accounts for ~55,000 gas overhead not captured by `gasleft()` measurement:
+- Function dispatch and calldata decoding
+- EIP-712 hashing for gas refund commitment
+- Reentrancy guard operations (TSTORE/TLOAD)
+- Settlement call overhead
+
+## Example Usage
+
+```solidity
+// Execute multi-chain ops without gas refund
+intentExecutor.executeMultichainOps(
+    MultiChainOps({
+        account: accountAddress,
+        chainIndex: 0,
+        otherChains: [chain1Hash, chain2Hash],
+        nonce: 1,
+        ops: operations,
+        signature: userSignature
+    })
+);
+
+// Execute with ERC20 gas refund
+(address account, uint256 nonce) = intentExecutor.executeMultichainOpsWithGasRefund_ERC20(
+    signedOps,
+    GasRefund({
+        token: usdcAddress,
+        exchangeRate: 2000e6, // 1 ETH = 2000 USDC
+        overhead: 100000 // additional 100k gas
+    }),
+    relayerAddress
+);
+
+// Execute single-chain with ETH refund (gas optimized)
+(address account, uint256 nonce) = intentExecutor.executeSinglechainOpsWithGasRefund_ETH(
+    signedOps,
+    50000, // 50k gas overhead
+    relayerAddress
+);
+```
+
+## Events
+
+<ResponseField name="IntentExecuted" type="event">
+  ```solidity
+  event IntentExecuted(address account, uint256 nonce)
+  ```
+  Emitted when an intent is successfully executed.
+</ResponseField>
+
+## Error Handling
+
+<ResponseField name="InvalidSignature" type="error">
+  Thrown when signature validation fails
+</ResponseField>
+
+<ResponseField name="InvalidGasToken" type="error">
+  Thrown when Constants.NATIVE_TOKEN is used with ERC20 refund functions
+</ResponseField>
+
+## EIP-712 Domain
+
+The contract uses the following EIP-712 domain:
+- **Name**: "IntentExecutor"
+- **Version**: "v0.0.1"
+
+## Comparison: Multi-Chain vs Single-Chain
+
+| Feature | Multi-Chain | Single-Chain |
+|---------|------------|-------------|
+| Chain ID in signature | No (chain-agnostic) | Yes (chain-specific) |
+| Cross-chain validity | Yes | No |
+| Gas cost | Higher (~850 gas more) | Lower (optimized) |
+| Use case | Coordinated multi-chain | Single chain only |
+| Struct complexity | More complex | Simpler |
+
+## Security Considerations
+
+<Warning>
+  **Chain-Agnostic Signatures**: Multi-chain operations use signatures without chain ID in the digest, allowing the same signature across chains. Ensure operations are designed for this cross-chain validity.
+</Warning>
+
+<Warning>
+  **Nonce Consumption**: Nonces are consumed before signature validation (CEI pattern) to prevent partial state changes on validation failure.
+</Warning>
+
+<Warning>
+  **Gas Refund Commitment**: Gas refund parameters are included in the EIP-712 signature to prevent relayers from modifying refund terms after signing.
+</Warning>
+
+<Tip>
+  For single-chain operations, prefer `executeSinglechainOps` variants for better gas efficiency (~3.4% cheaper).
+</Tip>
+
+## Related
+
+- [IntentExecutor](/api/executor/intent-executor) - Main executor contract
+- [CompactIntentExecutor](/api/executor/compact-intent) - Compact protocol execution
+- [Permit2IntentExecutor](/api/executor/permit2-intent) - Permit2-based execution

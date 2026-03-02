@@ -1,0 +1,154 @@
+---
+title: "RouterLogic"
+description: "Core routing logic contract for the Warp Router ecosystem"
+---
+
+## Overview
+
+The RouterLogic contract serves as the central coordination hub for all settlement operations within the Rhinestone ecosystem. It orchestrates settlement operations across multiple protocols and adapters with advanced gas optimization and security features.
+
+**Core Responsibilities:**
+- Operation Routing: Routes fill and claim operations to appropriate protocol adapters
+- Atomic Execution: Ensures batched operations execute atomically or revert entirely
+- Gas Optimization: Implements advanced caching and optimization techniques for batch operations
+- Security Enforcement: Validates signatures and prevents unauthorized operation execution
+- Context Management: Manages solver-specific contexts for each operation in a batch
+
+## Operation Types
+
+### Fill Operations
+
+Settlement operations that fulfill user orders by transferring assets and executing user-specified target operations. Require atomic signature validation.
+
+### Claim Operations
+
+Resource unlock operations that claim user assets from protocols like Compact or Permit2. Can be executed independently without atomic signatures.
+
+## Functions
+
+### optimized_routeFill921336808
+
+Gas-optimized version of routeFill with enhanced batching and caching mechanisms.
+
+```solidity
+function optimized_routeFill921336808(
+    bytes[] calldata relayerContexts,
+    bytes calldata encodedAdapterCalldatas,
+    bytes calldata atomicFillSignature
+) public payable virtual nonReentrant
+```
+
+<ParamField path="relayerContexts" type="bytes[]">
+  Array of solver-specific contexts, consumed only by regular adapter calls. Special selectors (singleCall, multiCall, fee collection) do not consume contexts.
+</ParamField>
+
+<ParamField path="encodedAdapterCalldatas" type="bytes">
+  ABI-encoded bytes containing the array of adapter calldatas. Must be encoded as: `abi.encode(bytes[] adapterCalldatas)`
+</ParamField>
+
+<ParamField path="atomicFillSignature" type="bytes">
+  Signature from atomicFillSigner authorizing this batch execution. Signed message is `keccak256(encodedAdapterCalldatas)`.
+</ParamField>
+
+**Gas Optimizations:**
+
+1. **Encoded Calldata Format**: Accepts ABI-encoded bytes parameter to reduce calldata costs (~200-500 gas per element)
+2. **Adapter Caching**: Caches the last used adapter address and selector. Cache hits save ~2100 gas per operation
+3. **Special Selector Optimization**: Built-in selectors bypass adapter lookup, saving ~2600+ gas per special call
+4. **Inline Assembly Decoding**: Operates directly on calldata without copying to memory
+5. **Solver Context Management**: Distinguishes operations that consume solver contexts from those that don't
+
+<Warning>
+This function requires valid atomic signature from the authorized signer. All operations must succeed or entire batch reverts.
+</Warning>
+
+### routeClaim (Batch)
+
+Executes multiple claim operations in batch, routing each to its corresponding protocol adapter.
+
+```solidity
+function routeClaim(
+    bytes[] calldata relayerContexts,
+    bytes[] calldata adapterCalldatas
+) external payable nonReentrant
+```
+
+<ParamField path="relayerContexts" type="bytes[]">
+  Array of solver-specific contexts for each non-special operation. Each regular adapter call consumes one context in order. Special selectors don't consume contexts.
+</ParamField>
+
+<ParamField path="adapterCalldatas" type="bytes[]">
+  Array of calldata for adapter execution, each prefixed with a 4-byte selector identifying the target adapter or special operation type.
+</ParamField>
+
+**Operation Flow:**
+1. Extract 4-byte selector from each calldata to identify the target adapter
+2. Check for special selectors that bypass adapter lookup (gas optimization)
+3. For regular operations: load adapter (with caching), consume solver context, execute
+4. Validate all solver contexts were consumed (prevents misconfiguration)
+
+Unlike fill operations, claim operations don't require atomic signatures as they represent resource unlocking from protocols where users have already authorized the operations through signatures at the protocol level.
+
+### routeClaim (Single)
+
+Executes a single claim operation by routing it to the appropriate protocol adapter.
+
+```solidity
+function routeClaim(
+    bytes calldata relayerContext,
+    bytes calldata adapterCalldata
+) public payable nonReentrant
+```
+
+<ParamField path="relayerContext" type="bytes">
+  The solver-specific context data required by the adapter for this claim. Contains parameters like user addresses, amounts, signatures, and other operation-specific data.
+</ParamField>
+
+<ParamField path="adapterCalldata" type="bytes">
+  The complete calldata for adapter execution, including the 4-byte selector and encoded parameters. The selector determines which adapter to route to.
+</ParamField>
+
+Simplified single-operation version optimized for individual claims. Special selectors bypass adapter lookup for maximum gas efficiency.
+
+### _isAtomic
+
+Validates atomic execution authorization by verifying a cryptographic signature.
+
+```solidity
+function _isAtomic(
+    bytes32 hash,
+    bytes calldata atomicSig
+) internal virtual returns (bool atomic)
+```
+
+<ParamField path="hash" type="bytes32">
+  The keccak256 hash of the encoded adapter calldatas being executed atomically. This hash binds the signature to the specific operations being performed.
+</ParamField>
+
+<ParamField path="atomicSig" type="bytes">
+  The ECDSA signature generated by the atomic signer over the provided hash. Must be in the format expected by ECDSA.recoverCalldata (65 bytes: r + s + v).
+</ParamField>
+
+**Returns:**
+- `atomic` (bool): True if the signature is valid and came from the authorized atomic signer, false otherwise
+
+<Warning>
+This function is critical for protocol security. Uses ECDSA signature recovery which is resistant to signature malleability attacks. The hash parameter prevents signature replay across different operation batches.
+</Warning>
+
+## Security Model
+
+- **Atomic Signatures**: Fill operations require signature from designated atomicFillSigner
+- **Reentrancy Protection**: All external functions protected via ReentrancyGuardTransient
+- **Access Control**: RouterManager provides role-based adapter management
+- **Context Validation**: Ensures solver contexts match operation requirements
+- **Batch Integrity**: All operations in a batch must succeed or entire batch reverts
+
+## Adapter Architecture
+
+The router uses a selector-based adapter system where each operation type maps to a specific adapter contract via a 4-byte function selector. This enables:
+
+- **Modular Protocol Support**: New protocols can be added by registering new adapters
+- **Version Management**: Protocol upgrades handled through adapter replacement
+- **Gas Efficiency**: Direct routing eliminates unnecessary abstraction layers
+- **Special Operations**: Built-in selectors bypass adapter layer for common operations

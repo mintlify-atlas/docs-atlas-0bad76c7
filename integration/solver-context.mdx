@@ -1,0 +1,418 @@
+---
+title: "Solver Context"
+description: "Understanding and using solver context in Warp Router integrations"
+---
+
+Solver context (also called relayer context) is a critical component that allows solvers to pass settlement-specific data to adapters. This guide explains how context works and how to use it with different adapters.
+
+## What is Solver Context?
+
+Solver context is arbitrary bytes data that solvers append to adapter calls to configure settlement behavior. Each adapter defines its own context format based on its specific requirements.
+
+**Key Characteristics:**
+- Solver-specific configuration data passed to adapters
+- Format varies by adapter implementation
+- Extracted efficiently using assembly in `AdapterBase.sol:137-144`
+- Does not increase gas costs significantly due to calldata efficiency
+
+## How Context Works
+
+When the Router calls an adapter, it appends the solver context using a specific encoding pattern:
+
+```solidity
+// From AdapterBase.sol:116
+// Resulting calldata: [function_calldata][relayer_context][context_length]
+abi.encodePacked(adapterCalldata, relayerContext, uint256(relayerContext.length))
+```
+
+### Calldata Structure
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Original Function Calldata                                 │
+│  (4-byte selector + encoded parameters)                     │
+├─────────────────────────────────────────────────────────────┤
+│  Relayer Context Bytes                                      │
+│  (solver-specific data)                                     │
+├─────────────────────────────────────────────────────────────┤
+│  Context Length (32 bytes)                                  │
+│  (uint256 length of context)                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Extracting Context
+
+Adapters extract context using the `_loadRelayerContext()` helper:
+
+```solidity
+// From AdapterBase.sol:137-144
+function _loadRelayerContext() internal pure returns (
+    uint256 contextLength,
+    bytes calldata relayerContext
+) {
+    assembly ("memory-safe") {
+        let totalSize := calldatasize()
+        contextLength := calldataload(sub(totalSize, 0x20))
+        relayerContext.offset := sub(totalSize, add(contextLength, 0x20))
+        relayerContext.length := contextLength
+    }
+}
+```
+
+This efficient assembly code:
+1. Reads the context length from the last 32 bytes of calldata
+2. Calculates the offset where context begins
+3. Returns a calldata slice without copying data
+
+## Adapter-Specific Context Formats
+
+### SameChainAdapter
+
+The SameChainAdapter expects the simplest context format - just a recipient address.
+
+**Format:**
+```solidity
+abi.encodePacked(address tokenInRecipient)
+```
+
+**Implementation from `SameChainAdapter.sol:115-120`:**
+```solidity
+function _tokenInRecipient() internal pure returns (address tokenInRecipient) {
+    (uint256 relayerContextLength, bytes calldata relayerContext) = _loadRelayerContext();
+    require(relayerContextLength == 20, InvalidRelayerContext());
+    // The first 20 bytes are the tokenIn recipient address
+    return address(bytes20(relayerContext[:20]));
+}
+```
+
+**Usage Example:**
+```solidity
+// Solver wants input tokens sent to their address
+address solverAddress = 0x742d35Cc6634C0532925a3b844Bc454e4438f44e;
+bytes memory solverContext = abi.encodePacked(solverAddress);
+
+// Call router with this context
+router.routeFill(solverContext, adapterCalldata);
+```
+
+**In Settlement Flow (from `SameChainAdapter.sol:233-244`):**
+```solidity
+function _handleCompactFill(FillDataCompact calldata fillData, address tokenInRecipient) internal {
+    // Pre-fund the recipient with output tokens
+    _prefundRecipient({ 
+        from: msg.sender, 
+        to: fillData.order.recipient, 
+        tokenOut: fillData.order.tokenOut 
+    });
+    
+    // Call arbiter - tokenInRecipient receives input tokens
+    SameChainArbiter(ARBITER).handleCompact_NotarizedChain({
+        order: fillData.order,
+        sigs: fillData.userSigs,
+        otherElements: fillData.otherElements,
+        allocatorData: fillData.allocatorData,
+        relayer: tokenInRecipient  // Solver receives input tokens here
+    });
+    
+    emit RouterFilled(sponsor, nonce);
+}
+```
+
+### MultiCallAdapter
+
+The MultiCallAdapter also uses a simple address-only context.
+
+**Format:**
+```solidity
+abi.encodePacked(address tokenInRecipient)
+```
+
+**Implementation from `MultiCallAdapter.sol:42-47`:**
+```solidity
+function _tokenInRecipient() internal pure returns (address) {
+    (uint256 relayerContextLength, bytes calldata relayerContext) = _loadRelayerContext();
+    require(relayerContextLength == 20, InvalidRelayerContext());
+    // The first 20 bytes are the tokenIn recipient address
+    return address(bytes20(relayerContext[:20]));
+}
+```
+
+**Usage Example:**
+```solidity
+address solverAddress = 0x742d35Cc6634C0532925a3b844Bc454e4438f44e;
+bytes memory solverContext = abi.encodePacked(solverAddress);
+
+bytes memory calldata = abi.encodeWithSelector(
+    IMultiCallAdapter.multicall_handleFill.selector,
+    fillData
+);
+
+router.routeFill(solverContext, calldata);
+```
+
+**Helper Function:**
+```solidity
+// From MultiCallAdapter.sol:33-35
+function __encodeRelayerData(address tokenInRecipient) external pure returns (bytes memory) {
+    return abi.encodePacked(tokenInRecipient);
+}
+```
+
+### IntentExecutorAdapter
+
+The IntentExecutorAdapter doesn't consume any solver context.
+
+**From `IntentExecutorAdapter.sol:227-229`:**
+```solidity
+function ADAPTER_TAG() external pure override returns (bytes12) {
+    return Constants.DEFAULT_ADAPTER_TAG.setSkipRelayerContext();
+}
+```
+
+Adapters that skip relayer context have special tags that tell the Router not to consume a context entry for them. This is important for batch operations.
+
+**Usage Example:**
+```solidity
+// No context needed for IntentExecutor
+bytes[] memory contexts = new bytes[](0);
+bytes[] memory calldatas = new bytes[](1);
+
+calldatas[0] = abi.encodeWithSelector(
+    IIntentExecutorAdapter.handleFill_intentExecutor_handleCompactTargetOps.selector,
+    executorCalldata
+);
+
+// Empty contexts array
+router.optimized_routeFill921336808(
+    contexts,  // Empty
+    abi.encode(calldatas),
+    atomicSig
+);
+```
+
+## Context in Batch Operations
+
+When executing batch operations, context consumption follows specific rules:
+
+### Regular Adapters
+
+Each regular adapter call consumes one solver context from the array in order.
+
+```solidity
+bytes[] memory contexts = new bytes[](3);
+bytes[] memory calldatas = new bytes[](3);
+
+// Three SameChainAdapter calls = three contexts
+contexts[0] = abi.encodePacked(recipient1);
+contexts[1] = abi.encodePacked(recipient2);
+contexts[2] = abi.encodePacked(recipient3);
+
+for (uint i = 0; i < 3; i++) {
+    calldatas[i] = abi.encodeWithSelector(
+        ISameChainAdapter.samechain_compact_handleFill.selector,
+        fillDatas[i]
+    );
+}
+```
+
+### Mixed Adapters
+
+Special selectors and adapters that skip context don't consume entries:
+
+```solidity
+bytes[] memory contexts = new bytes[](2);  // Only 2, not 3!
+bytes[] memory calldatas = new bytes[](3);
+
+// Call 0: Regular adapter - consumes context[0]
+contexts[0] = abi.encodePacked(recipient1);
+calldatas[0] = abi.encodeWithSelector(
+    ISameChainAdapter.samechain_compact_handleFill.selector,
+    fillData1
+);
+
+// Call 1: IntentExecutor - SKIPS context (doesn't consume)
+calldatas[1] = abi.encodeWithSelector(
+    IIntentExecutorAdapter.handleFill_intentExecutor_handleCompactTargetOps.selector,
+    executorCalldata
+);
+
+// Call 2: Regular adapter - consumes context[1]
+contexts[1] = abi.encodePacked(recipient2);
+calldatas[2] = abi.encodeWithSelector(
+    ISameChainAdapter.samechain_compact_handleFill.selector,
+    fillData2
+);
+```
+
+### Context Validation
+
+The Router validates context consumption at the end of batch execution:
+
+**From `RouterLogic.sol:288-292`:**
+```solidity
+// Ensure all provided solver contexts were consumed
+// This prevents accidentally providing too many contexts
+require(relayerContextsLength == relayerContextIndex, IRouter.LengthMismatch());
+```
+
+If you provide the wrong number of contexts, you'll get a `LengthMismatch` error.
+
+## Building Custom Context Formats
+
+When building custom adapters, design your context format carefully:
+
+<Steps>
+  <Step title="Define your data structure">
+    Determine what configuration your adapter needs:
+
+    ```solidity
+    // Example: Custom adapter needs recipient and slippage
+    struct MyRelayerContext {
+        address recipient;
+        uint256 slippageBps;
+        bytes routingData;
+    }
+    ```
+  </Step>
+
+  <Step title="Implement extraction function">
+    Create a helper to extract and validate context:
+
+    ```solidity
+    function _loadMyContext() internal pure returns (
+        address recipient,
+        uint256 slippageBps,
+        bytes calldata routingData
+    ) {
+        (uint256 contextLength, bytes calldata context) = _loadRelayerContext();
+        
+        // Validate minimum length (20 bytes + 32 bytes)
+        require(contextLength >= 52, InvalidRelayerContext());
+        
+        // Extract fields
+        recipient = address(bytes20(context[0:20]));
+        slippageBps = uint256(bytes32(context[20:52]));
+        routingData = context[52:];
+    }
+    ```
+  </Step>
+
+  <Step title="Use in adapter functions">
+    Extract context in your fill/claim operations:
+
+    ```solidity
+    function myCustomFill(FillData calldata fillData) 
+        external 
+        payable 
+        onlyViaRouter 
+        returns (bytes4) 
+    {
+        // Extract solver context
+        (address recipient, uint256 slippageBps, bytes calldata routingData) = _loadMyContext();
+        
+        // Use context in settlement logic
+        _executeWithSlippage(fillData, recipient, slippageBps, routingData);
+        
+        return this.myCustomFill.selector;
+    }
+    ```
+  </Step>
+
+  <Step title="Provide encoding helper">
+    Make it easy for solvers to construct context:
+
+    ```solidity
+    function encodeMyRelayerContext(
+        address recipient,
+        uint256 slippageBps,
+        bytes calldata routingData
+    ) external pure returns (bytes memory) {
+        return abi.encodePacked(recipient, slippageBps, routingData);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Best Practices
+
+### Efficiency
+
+- **Keep it compact**: Use `abi.encodePacked` instead of `abi.encode` to minimize calldata size
+- **Fixed-size when possible**: Fixed-size types (address, uint256) are easier to extract than dynamic types
+- **Validate length**: Always check context length to prevent out-of-bounds access
+
+### Safety
+
+- **Validate addresses**: Check that extracted addresses are not zero when required
+- **Bounds checking**: Ensure context is long enough before extracting data
+- **Clear errors**: Use descriptive error messages for context validation failures
+
+### Documentation
+
+- **Document format**: Clearly document the expected context format for your adapter
+- **Provide helpers**: Include encoding helper functions for solvers
+- **Show examples**: Include usage examples in comments and documentation
+
+## Debugging Context Issues
+
+### Common Problems
+
+**`InvalidRelayerContext` Error**
+- Context length doesn't match expected size
+- Check that you're encoding the right data types
+
+```solidity
+// Wrong: abi.encode adds extra padding
+bytes memory wrongContext = abi.encode(address(0x123));
+
+// Right: abi.encodePacked is compact
+bytes memory rightContext = abi.encodePacked(address(0x123));
+```
+
+**`LengthMismatch` Error in Batches**
+- Number of contexts doesn't match number of regular adapter calls
+- Remember that special selectors and skip-context adapters don't consume entries
+
+```solidity
+// Wrong: 3 contexts for 2 regular + 1 skip-context adapter
+bytes[] memory contexts = new bytes[](3);
+
+// Right: 2 contexts for 2 regular adapters
+bytes[] memory contexts = new bytes[](2);
+```
+
+### Testing Context Extraction
+
+```solidity
+function testContextExtraction() public {
+    // Prepare context
+    address expectedRecipient = address(0x123);
+    bytes memory context = abi.encodePacked(expectedRecipient);
+    
+    // Prepare full calldata with context
+    bytes memory adapterCalldata = abi.encodeWithSelector(
+        adapter.myFill.selector,
+        fillData
+    );
+    bytes memory fullCalldata = abi.encodePacked(
+        adapterCalldata,
+        context,
+        uint256(context.length)
+    );
+    
+    // Test extraction
+    (bool success,) = address(adapter).delegatecall(fullCalldata);
+    assertTrue(success);
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building Adapters" icon="puzzle-piece" href="/integration/building-adapters">
+    Learn how to build custom adapters with context
+  </Card>
+  <Card title="Solver Guide" icon="robot" href="/integration/solvers">
+    Complete guide for solver integration
+  </Card>
+</CardGroup>

@@ -1,0 +1,252 @@
+---
+title: Gas Optimization
+description: Advanced gas optimization techniques in Warp Router
+---
+
+Warp Router implements multiple gas optimization techniques that can reduce operational costs by 20-40% compared to standard routing implementations.
+
+## Adapter Caching
+
+One of the most effective optimizations is **adapter caching** in batch operations. When processing multiple operations with the same adapter, the Router caches the adapter address to avoid repeated storage reads.
+
+### How It Works
+
+In RouterLogic.sol:188-280, the optimized routing function implements:
+
+```solidity
+bytes4 prevSelector;
+address adapter;
+
+for (uint256 i; i < length;) {
+    bytes4 selector = bytes4(adapterCalldata[:4]);
+    
+    if (selector != prevSelector) {
+        // Selector changed - load adapter from storage (2100 gas)
+        adapter = selector.withFillAdapter().adapterAddress();
+        prevSelector = selector;
+    }
+    // If selector == prevSelector, reuse cached adapter (saves ~2100 gas)
+}
+```
+
+### Gas Savings
+
+- **Cold SLOAD**: ~2,100 gas per adapter lookup
+- **Cache hit**: Skips SLOAD entirely
+- **Typical savings**: 20-40% for batches with repeated adapters
+
+<Tip>
+  When batching operations, group calls to the same adapter together to maximize cache hits.
+</Tip>
+
+## Special Selectors
+
+Special selectors bypass the adapter lookup mechanism entirely for common operations, providing even greater gas savings.
+
+### Available Special Selectors
+
+#### singleCall
+
+```solidity
+ISingleCaller.singleCall.selector
+```
+
+Executes a single external call directly without adapter overhead. Defined in DirectRoutes.sol:121-127.
+
+**Gas savings**: ~2,600+ gas per call (SLOAD + DELEGATECALL overhead)
+
+#### multiCall
+
+```solidity
+MultiCaller.multiCall.selector
+```
+
+Batches multiple external calls in a single transaction. Defined in DirectRoutes.sol:128-134.
+
+**Gas savings**: Similar to singleCall, with additional batching efficiency
+
+#### Fee Collection
+
+In-router fee collection functions process fees without delegatecall:
+
+```solidity
+IDirectRoute.onFill_inRouter_collectFee.selector
+IDirectRoute.onFill_inRouter_collectFees.selector
+```
+
+Defined in DirectRoutes.sol:160-171.
+
+**Gas savings**: ~2,600+ gas + eliminates adapter call overhead
+
+### How Special Selectors Work
+
+From DirectRoutes.sol:146-179:
+
+```solidity
+function _processDirectFillRoute(bytes4 selector, bytes calldata adapterCalldata) 
+    internal returns (bool used) 
+{
+    if (selector == ISingleCaller.singleCall.selector) {
+        (bool success,) = address(CALLER).call(adapterCalldata[4:]);
+        require(success, CallFailed());
+        return true;
+    } else if (selector == MultiCaller.multiCall.selector) {
+        (bool success,) = address(CALLER).call(adapterCalldata);
+        require(success, CallFailed());
+        return true;
+    } else if (selector == IDirectRoute.onFill_inRouter_collectFee.selector) {
+        _onFill_inRouter_collectFee(adapterCalldata[4:]);
+        return true;
+    }
+    // ... more special selectors
+}
+```
+
+## Batch Operations
+
+### Optimized Encoding
+
+The `optimized_routeFill921336808` function uses encoded calldata to reduce costs:
+
+```solidity
+function optimized_routeFill921336808(
+    bytes[] calldata relayerContexts,
+    bytes calldata encodedAdapterCalldatas,  // Encoded instead of bytes[]
+    bytes calldata atomicFillSignature
+)
+```
+
+**Benefits**:
+- Reduces calldata costs by avoiding array decoding overhead
+- Saves ~200-500 gas per element
+- Assembly-based decoding operates directly on calldata pointers
+
+### Assembly Decoding
+
+From RouterLogic.sol:206-221:
+
+```solidity
+bytes[] calldata adapterCalldatas;
+uint256 length;
+assembly ("memory-safe") {
+    let o := add(encodedAdapterCalldatas.offset, calldataload(encodedAdapterCalldatas.offset))
+    adapterCalldatas.offset := add(o, 0x20)
+    length := calldataload(o)
+    adapterCalldatas.length := length
+}
+```
+
+This avoids memory copying and operates directly on calldata, saving memory expansion costs.
+
+## Solver Context Management
+
+### Skip Relayer Context
+
+Adapters can declare they don't need relayer context using adapter tags:
+
+```solidity
+function ADAPTER_TAG() external pure override returns (bytes12) {
+    return Constants.DEFAULT_ADAPTER_TAG.setSkipRelayerContext();
+}
+```
+
+From IntentExecutorAdapter.sol:227-229.
+
+**Benefits**:
+- Skips array access and bounds checking
+- Prevents unnecessary context consumption tracking
+- Example: IntentExecutorAdapter doesn't consume relayer context
+
+### Context Consumption Tracking
+
+From RouterLogic.sol:261-280:
+
+```solidity
+if (adapterTag.isSkipRelayerContext()) {
+    // No context consumption - more gas efficient
+    require(selector == adapter.callAdapter(adapterCalldata));
+} else {
+    // Consume relayer context
+    require(relayerContextIndex < relayerContextsLength);
+    require(
+        selector == adapter.callAdapterWithRelayerContext(
+            relayerContexts[relayerContextIndex], 
+            adapterCalldata
+        )
+    );
+    ++relayerContextIndex;
+}
+```
+
+## Packed Calldata Encoding
+
+For approval operations, DirectRoutes uses packed encoding to save calldata costs.
+
+### Single Approval
+
+From DirectRoutes.sol:332-368:
+
+```solidity
+// Packed: abi.encodePacked(address token, address spender, uint256 amount, uint64 chainId, uint32 expires)
+// Layout: [20 bytes][20 bytes][32 bytes][8 bytes][4 bytes] = 84 bytes total
+// vs ABI encoding: ~160 bytes
+```
+
+**Savings**: ~76 bytes per approval (~1,200 gas at 16 gas/byte)
+
+### Batch Approvals
+
+From DirectRoutes.sol:386-415:
+
+```solidity
+// Packed prefix + ABI array:
+// abi.encodePacked(uint64 chainId, uint32 expires) + abi.encode(uint256[3][])
+// Saves 12 bytes of calldata overhead per batch
+```
+
+## Performance Benchmarks
+
+Based on DirectGasComparison.t.sol test results:
+
+<CardGroup cols={2}>
+  <Card title="Adapter Caching" icon="gauge-high">
+    20-30% savings for 3+ identical adapter calls
+  </Card>
+  <Card title="Special Selectors" icon="bolt">
+    ~2,600 gas saved per direct route
+  </Card>
+  <Card title="Encoded Calldata" icon="binary">
+    200-500 gas saved per batch element
+  </Card>
+  <Card title="Packed Encoding" icon="compress">
+    ~1,200 gas saved per approval
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Group by Adapter">
+    Batch operations that use the same adapter together to maximize cache hits
+  </Step>
+  
+  <Step title="Use Special Selectors">
+    For simple calls and fee collection, use special selectors instead of custom adapters
+  </Step>
+  
+  <Step title="Skip Unnecessary Context">
+    If your adapter doesn't need relayer context, use `setSkipRelayerContext()` in your adapter tag
+  </Step>
+  
+  <Step title="Use Packed Encoding">
+    For approvals and simple data, prefer packed encoding over ABI encoding
+  </Step>
+</Steps>
+
+<Warning>
+  Always benchmark your specific use case. Gas savings vary based on:
+  - Number of operations in batch
+  - Adapter diversity
+  - Storage slot warmth (cold vs warm)
+  - Network gas pricing
+</Warning>

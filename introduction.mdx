@@ -1,0 +1,152 @@
+---
+title: 'Warp Router'
+description: 'A modular, gas-optimized settlement routing system for cross-protocol and cross-chain operations'
+keywords: ['warp router', 'settlement', 'cross-chain', 'defi', 'compact', 'permit2']
+---
+
+# Welcome to Warp Router
+
+The Warp Router is a sophisticated settlement orchestration system that enables atomic execution of complex DeFi operations across multiple protocols. It provides a unified interface for solvers and relayers to execute trades, manage liquidity, and settle orders through various settlement layers including TheCompact, Permit2, and cross-chain bridges.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get started with Warp Router integration in minutes
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the three-layer routing system
+  </Card>
+  <Card title="API Reference" icon="code" href="/api">
+    Explore the complete API documentation
+  </Card>
+  <Card title="Examples" icon="book-open" href="/examples">
+    View real-world integration examples
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<CardGroup cols={3}>
+  <Card title="Modular Architecture" icon="puzzle-piece">
+    Delegatecall-based adapter pattern separates routing logic from protocol-specific implementations
+  </Card>
+  <Card title="Gas Optimized" icon="gauge-high">
+    Advanced caching reduces gas costs by 20-40% for batch operations
+  </Card>
+  <Card title="Multi-Protocol" icon="network-wired">
+    Native support for TheCompact, Permit2, and extensible cross-chain protocols
+  </Card>
+  <Card title="Atomic Execution" icon="atom">
+    Ensures multiple operations execute atomically or revert entirely
+  </Card>
+  <Card title="Secure by Design" icon="shield-halved">
+    Cryptographic signatures and role-based access control protect user funds
+  </Card>
+  <Card title="Solver Friendly" icon="brain">
+    Flexible solver context system for settlement-specific data
+  </Card>
+</CardGroup>
+
+## How It Works
+
+The Warp Router implements a three-layer architecture that enables seamless integration of new protocols while maintaining consistent security guarantees:
+
+<Steps>
+  <Step title="Router Layer">
+    Handles operation routing, batching of settlement layers, and enforcement of atomicity. The Router validates signatures, manages adapter caching, and ensures all operations in a batch succeed or revert together.
+  </Step>
+  <Step title="Adapter Layer">
+    Protocol-specific settlement logic executed via delegatecall. Adapters translate generic router calls into protocol-specific operations while inheriting the Router's security context.
+  </Step>
+  <Step title="Arbiter Layer">
+    Validates and unlocks user resources for settlement. Arbiters handle pre-claim operations, compute mandate hashes, and orchestrate settlement flow across TheCompact and Permit2.
+  </Step>
+</Steps>
+
+## Operation Types
+
+### Fill Operations
+
+Settlement operations that fulfill user orders by transferring assets and executing target operations. Fill operations require atomic signature validation from an authorized signer.
+
+```solidity src/router/core/RouterLogic.sol
+function optimized_routeFill921336808(
+    bytes[] calldata relayerContexts,
+    bytes calldata encodedAdapterCalldatas,
+    bytes calldata atomicFillSignature
+) public payable virtual nonReentrant;
+```
+
+<Info>Fill operations support advanced gas optimization through adapter caching and special selectors, reducing operational costs significantly.</Info>
+
+### Claim Operations
+
+Resource unlock operations that claim user assets from protocols like TheCompact or Permit2. Claim operations can be executed independently without atomic signatures as they rely on protocol-level authorization.
+
+```solidity
+function routeClaim(
+    bytes[] calldata relayerContexts,
+    bytes[] calldata adapterCalldatas
+) external payable nonReentrant;
+```
+
+## Why Warp Router?
+
+<AccordionGroup>
+  <Accordion title="Unified Settlement Interface">
+    Instead of integrating with multiple settlement protocols separately, Warp Router provides a single, consistent interface for executing operations across TheCompact, Permit2, and cross-chain bridges. This reduces integration complexity and maintenance overhead.
+  </Accordion>
+  
+  <Accordion title="Gas Efficiency at Scale">
+    The Router's adapter caching mechanism reuses adapter addresses for consecutive operations with the same selector, saving approximately 2,100 gas per cache hit. Special selectors bypass adapter lookup entirely, saving 2,600+ gas per operation. For batch operations, these optimizations compound to deliver 20-40% gas savings.
+  </Accordion>
+  
+  <Accordion title="Battle-Tested Security">
+    Every fill operation requires cryptographic signature validation from an authorized atomic signer, preventing unauthorized execution. Reentrancy protection via transient storage guards against common attack vectors. Role-based access control enables secure adapter lifecycle management.
+  </Accordion>
+  
+  <Accordion title="Solver Flexibility">
+    The solver context system allows each operation in a batch to carry settlement-specific data. Solvers can specify token recipients, routing parameters, and execution preferences on a per-operation basis while maintaining batch atomicity.
+  </Accordion>
+</AccordionGroup>
+
+## Protocol Support
+
+Warp Router currently supports:
+
+- **TheCompact**: Native integration with full support for pre-claim operations, gas stipends, and allocator interactions
+- **Permit2**: Complete support for Permit2-based settlements with gasless token approvals
+- **Cross-chain**: Extensible adapter system enables integration with any cross-chain bridge protocol
+
+<Note>New protocol adapters can be added dynamically through the adapter management system without requiring router upgrades.</Note>
+
+## Gas Optimization Features
+
+<Columns cols={2}>
+  <div>
+    ### Adapter Caching
+    Consecutive operations using the same adapter reuse cached addresses, saving approximately 2,100 gas per cache hit by avoiding storage reads.
+  </div>
+  <div>
+    ### Special Selectors
+    Built-in operations like `singleCall` and `multiCall` bypass adapter lookup entirely, saving 2,600+ gas by avoiding both storage reads and delegatecalls.
+  </div>
+  <div>
+    ### Optimized Encoding
+    The `optimized_routeFill` function accepts pre-encoded calldata arrays, reducing decoding overhead by 200-500 gas per element.
+  </div>
+  <div>
+    ### Context Indexing
+    Efficient solver context consumption tracking ensures only relevant operations access context data, minimizing unnecessary array access.
+  </div>
+</Columns>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Integration Guide" icon="code" href="/quickstart">
+    Follow our step-by-step guide to integrate Warp Router into your solver or relayer
+  </Card>
+  <Card title="Architecture Deep Dive" icon="sitemap" href="/architecture">
+    Learn how the Router, Adapter, and Arbiter layers work together
+  </Card>
+</CardGroup>

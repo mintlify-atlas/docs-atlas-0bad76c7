@@ -1,0 +1,279 @@
+---
+title: 'Permit2Arbiter'
+description: 'Abstract base contract providing Permit2 protocol integration for signature-based token transfers'
+icon: 'signature'
+---
+
+## Overview
+
+Permit2Arbiter serves as the integration layer with Uniswap's Permit2 protocol, enabling arbiters to execute token transfers using cryptographic signatures instead of traditional allowances.
+
+<Info>
+  Permit2 is a token approval management protocol that allows users to grant token spending permissions through signatures rather than on-chain approvals, providing better UX and gas efficiency.
+</Info>
+
+## Key Benefits
+
+- **Eliminates approval transactions**: No need for separate approval transactions before token transfers
+- **Batch token transfers**: Transfer multiple tokens with a single signature
+- **Fine-grained control**: Precise permissions with nonces and deadlines
+- **Gas efficiency**: Signature-based transfers eliminate separate approval gas costs
+- **Enhanced security**: Battle-tested signature validation with time-bounded permissions
+
+## Integration with Router Ecosystem
+
+- Processes token inputs from cross-chain orders using signature-based permissions
+- Converts order token data into Permit2-compatible permission structures
+- Handles witness-based transfers where mandate hashes serve as additional validation
+- Enables seamless token unlocking as part of cross-chain settlement flows
+
+## Constructor
+
+```solidity
+constructor(address permit2)
+```
+
+<ParamField path="permit2" type="address" required>
+  The address of the Permit2 SignatureTransfer contract on the current network. Must be the canonical Permit2 deployment to ensure signature compatibility and security.
+</ParamField>
+
+<Danger>
+  The permit2 address cannot be changed after deployment. Verify it matches the official Permit2 deployment for the target network. The address is different on each network but maintains the same interface.
+</Danger>
+
+## State Variables
+
+### PERMIT2
+
+```solidity
+ISignatureTransfer internal immutable PERMIT2;
+```
+
+Permit2 signature transfer interface for executing signature-based token transfers.
+
+<Info>
+  This immutable interface provides access to Permit2's signature transfer functionality, enabling secure token transfers through cryptographic signatures rather than allowances. Used for all signature-based token unlocking operations in the arbiter system.
+</Info>
+
+## Token Unlocking
+
+### _unlockPermit2
+
+```solidity
+function _unlockPermit2(
+    Types.Order calldata order,
+    bytes calldata sig,
+    bytes32 mandateHash,
+    address depositor
+) internal
+```
+
+Unlocks tokens using Permit2 signature-based transfers with mandate witness validation.
+
+<Info>
+  Processes token inputs from a cross-chain order by converting them into Permit2-compatible permission structures and executing signature-authorized transfers. The mandate hash serves as a witness to provide additional validation that the transfer is part of a valid cross-chain settlement operation.
+</Info>
+
+#### Execution Flow
+
+<Steps>
+  <Step title="Convert token data">
+    Converts order token data (id/amount pairs) into Permit2 TokenPermissions. This transforms `[token_id, amount]` pairs into proper token addresses and amounts.
+
+    ```solidity
+    (
+        ISignatureTransfer.TokenPermissions[] memory tokenPermission,
+        ISignatureTransfer.SignatureTransferDetails[] memory signatureTransferDetails
+    ) = order.tokenIn.toTokenPermissions(depositor);
+    ```
+  </Step>
+  <Step title="Create permit structure">
+    Creates SignatureTransferDetails specifying the depositor as recipient. Constructs a PermitBatchTransferFrom with order nonce and expiry.
+
+    ```solidity
+    ISignatureTransfer.PermitBatchTransferFrom memory permit =
+        ISignatureTransfer.PermitBatchTransferFrom({
+            permitted: tokenPermission,
+            nonce: order.nonce,
+            deadline: order.expires
+        });
+    ```
+  </Step>
+  <Step title="Execute transfer">
+    Executes `permitWitnessTransferFrom` with mandate hash as witness data. The mandate hash proves the transfer is part of a valid cross-chain order.
+
+    ```solidity
+    PERMIT2.permitWitnessTransferFrom({
+        permit: permit,
+        transferDetails: signatureTransferDetails,
+        owner: order.sponsor,
+        witness: mandateHash,
+        witnessTypeString: Permit2Lib.WITNESS_TYPESTRING,
+        signature: sig
+    });
+    ```
+  </Step>
+</Steps>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  The cross-chain order containing token inputs, sponsor, nonce, and expiry details. The `tokenIn` array contains `[token_id, amount]` pairs that get converted to token addresses.
+</ParamField>
+
+<ParamField path="sig" type="bytes" required>
+  The signature from the order sponsor authorizing the Permit2 token transfer. Must be a valid EIP-712 signature over the permit data and mandate witness.
+</ParamField>
+
+<ParamField path="mandateHash" type="bytes32" required>
+  The hash of the cross-chain mandate serving as witness data for additional validation. This proves the transfer is part of a legitimate cross-chain settlement operation.
+</ParamField>
+
+<ParamField path="depositor" type="address" required>
+  The address that will receive the transferred tokens. Typically the settlement contract or final recipient depending on the settlement flow.
+</ParamField>
+
+#### Security Features
+
+The function enables secure token transfers where:
+
+<AccordionGroup>
+  <Accordion title="Sponsor pre-signed permission">
+    The sponsor (token owner) has pre-signed permission for the transfer through their EIP-712 signature.
+  </Accordion>
+  <Accordion title="Mandate witness validation">
+    The mandate hash proves the transfer is part of a valid cross-chain order, providing an additional layer of security beyond basic token permissions.
+  </Accordion>
+  <Accordion title="Recipient validation">
+    The depositor receives the tokens as specified in the settlement, ensuring funds go to the intended recipient.
+  </Accordion>
+  <Accordion title="Replay protection">
+    Nonce prevents replay attacks and expiry ensures time-bounded permissions, protecting against stale or reused signatures.
+  </Accordion>
+</AccordionGroup>
+
+## Permit2 Data Structures
+
+### TokenPermissions
+
+```solidity
+struct TokenPermissions {
+    address token;
+    uint256 amount;
+}
+```
+
+Defines the token address and amount for a single token permission.
+
+### SignatureTransferDetails
+
+```solidity
+struct SignatureTransferDetails {
+    address to;
+    uint256 requestedAmount;
+}
+```
+
+Specifies the recipient address and amount for the transfer.
+
+### PermitBatchTransferFrom
+
+```solidity
+struct PermitBatchTransferFrom {
+    TokenPermissions[] permitted;
+    uint256 nonce;
+    uint256 deadline;
+}
+```
+
+Contains the complete permit structure for batch transfers:
+- `permitted`: Array of token permissions
+- `nonce`: Unique identifier preventing replay attacks
+- `deadline`: Expiration timestamp for the permit
+
+## Witness Type String
+
+The witness type string is used for EIP-712 signature validation with additional witness data:
+
+```solidity
+string constant WITNESS_TYPESTRING = "Mandate mandate)Mandate(...)";
+```
+
+<Info>
+  The witness mechanism provides additional validation beyond basic token permissions. The mandate hash is included in the EIP-712 signature, cryptographically linking the token transfer to the specific cross-chain settlement operation.
+</Info>
+
+## Example Usage
+
+Here's how Permit2Arbiter is used in a typical settlement flow:
+
+```solidity
+// 1. Generate mandate hash from order
+bytes32 mandateHash = _permit2PreClaimOps(order, sigs);
+
+// 2. Unlock tokens using Permit2 with mandate witness
+_unlockPermit2({
+    order: order,
+    sig: sigs.notarizedClaimSig,
+    depositor: relayer,
+    mandateHash: mandateHash
+});
+
+// 3. Tokens are now transferred to depositor (relayer)
+// 4. Continue with target operation execution
+```
+
+## Gas Optimization
+
+<Tip>
+  **Batch operations**: Uses batch operations when multiple tokens are present for optimal gas efficiency. Multiple tokens are processed in a single `permitWitnessTransferFrom` call.
+  
+  **Immutable storage**: Immutable Permit2 interface minimizes storage costs for repeated operations.
+  
+  **No approval costs**: Signature-based transfers eliminate the gas cost of separate approval transactions.
+</Tip>
+
+## Security Considerations
+
+<Warning>
+  **Signature validation**: All transfers require valid signatures from token owners (sponsors). The signature must be a properly formatted EIP-712 signature that includes both the permit data and the mandate witness.
+  
+  **Mandate witness**: Mandate hashes provide additional witness-based validation for cross-chain operations, ensuring transfers are part of legitimate settlement flows.
+  
+  **Time bounds**: Nonce and deadline parameters prevent replay attacks and ensure time-bounded permissions.
+  
+  **Permit2 dependency**: Signature validation relies on Permit2's implementation - ensure the Permit2 address is the canonical deployment.
+</Warning>
+
+## Comparison with CompactArbiter
+
+<Tabs>
+  <Tab title="Permit2Arbiter">
+    **Best for:**
+    - Simple token transfers
+    - Gas-optimized flows
+    - Straightforward settlement operations
+    
+    **Characteristics:**
+    - Signature-based permissions
+    - No pre-claim operation complexity
+    - Lower gas overhead
+    - Direct token transfers
+  </Tab>
+  <Tab title="CompactArbiter">
+    **Best for:**
+    - Complex cross-chain settlements
+    - Multi-step operations
+    - Advanced authorization patterns
+    
+    **Characteristics:**
+    - Resource locking/unlocking
+    - Pre-claim operation support
+    - Cross-chain coordination
+    - Multichain and exogenous claims
+  </Tab>
+</Tabs>
+
+## Source Code Reference
+
+Location: `/src/base/arbiter/Permit2Arbiter/Permit2Arbiter.sol:42`

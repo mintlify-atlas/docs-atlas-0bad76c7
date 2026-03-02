@@ -1,0 +1,370 @@
+---
+title: Security Considerations
+description: Security model and best practices for Warp Router adapters and solvers
+---
+
+Warp Router's security model relies on multiple layers of protection to ensure safe execution of cross-chain operations and protocol integrations.
+
+## Delegatecall Context
+
+Adapters are **always** executed via delegatecall from the Router contract. This is a critical security consideration.
+
+### Understanding Delegatecall Execution
+
+When the Router calls an adapter:
+
+```solidity
+// From AdapterLib.sol
+function callAdapter(address adapter, bytes calldata data) internal returns (bytes4) {
+    (bool success, bytes memory returndata) = adapter.delegatecall(data);
+    // ...
+}
+```
+
+**Critical implications**:
+
+1. **Storage context**: Adapter code runs in Router's storage space
+2. **Balance access**: Adapters can access Router's token balances
+3. **msg.sender**: Preserved from original caller
+4. **address(this)**: Equals Router address during execution
+
+<Warning>
+  Adapters have full access to Router's storage and balance during execution. Only install trusted, audited adapters.
+</Warning>
+
+### Adapter Security Requirements
+
+From AdapterBase.sol:17-21:
+
+```solidity
+/**
+ * @dev CRITICAL SECURITY NOTICE:
+ *      - Adapters are ALWAYS executed via delegatecall from the Router contract
+ *      - The Router's storage and balance are accessible during adapter execution
+ *      - DO NOT implement direct calls to untrusted contracts from adapter functions
+ *      - All external calls to untrusted contracts could be detrimental to Router security
+ */
+```
+
+### OnlyViaRouter Modifier
+
+All adapter functions must use the `onlyViaRouter` modifier:
+
+```solidity
+modifier onlyViaRouter() {
+    _onlyRouterAdapter();
+    _;
+}
+
+function _onlyRouterAdapter() internal view virtual {
+    require(address(this) == _ROUTER, OnlyDelegateCall());
+}
+```
+
+From AdapterBase.sol:99-111.
+
+**How it works**:
+- During delegatecall: `address(this)` equals `_ROUTER` ✓
+- During direct call: `address(this)` equals adapter address ✗
+
+<Tip>
+  Always use `onlyViaRouter` on adapter fill/claim functions to prevent direct calls that could bypass Router security.
+</Tip>
+
+## Atomic Fill Signatures
+
+All fill operations require a signature from the designated atomic signer to prevent unauthorized execution.
+
+### Signature Validation
+
+From RouterLogic.sol:145-154:
+
+```solidity
+function _isAtomic(bytes32 hash, bytes calldata atomicSig) internal virtual returns (bool atomic) {
+    address signer = $atomicFillSigner;
+    require(signer != address(0), IRouter.AtomicSignerNotSet());
+    
+    atomic = (signer == ECDSA.recoverCalldata(hash, atomicSig));
+}
+```
+
+**Security properties**:
+
+1. **Authorization Control**: Only designated signer can approve batches
+2. **Replay Protection**: Hash binds signature to specific calldata
+3. **Immutable Signer**: Set at deployment, cannot be changed
+4. **Pause Mechanism**: Setting signer to `address(0)` pauses fills
+
+### What Gets Signed
+
+From RouterLogic.sol:200:
+
+```solidity
+bytes32 hash = encodedAdapterCalldatas.hashCalldata();
+require(_isAtomic(hash, atomicFillSignature), IRouter.InvalidAtomicity());
+```
+
+The signature covers:
+- All adapter calldatas in the batch
+- Order and content of operations
+- Function selectors and parameters
+
+<Warning>
+  The atomic fill signer is immutable after deployment. Choose a secure address (hardware wallet or multisig) for production deployments.
+</Warning>
+
+## Arbiter Access Control
+
+Arbiters have exclusive access to protocol-level settlement functions.
+
+### OnlyRouter Pattern
+
+From ArbiterBase.sol:289-302:
+
+```solidity
+modifier onlyRouter() {
+    _onlyRouter();
+    _;
+}
+
+function _onlyRouter() internal virtual {
+    require(msg.sender == ROUTER, OnlyRouter());
+}
+```
+
+**Why this matters**:
+- Arbiters unlock user funds from protocols (TheCompact, Permit2)
+- Only Router should trigger these operations
+- Prevents unauthorized claim attempts
+- Ensures proper settlement flow
+
+### Pre-Claim Operations
+
+From ArbiterBase.sol:165-188:
+
+```solidity
+if (preClaimOpsHash != Constants.NO_OPS) {
+    if (opsType == SmartExecutionLib.Type.ERC7579) {
+        bool success = _handlePreClaimOpsCompactERC7579({
+            account: order.sponsor,
+            order: order,
+            signature: sigs,
+            // ...
+        });
+        require(success);
+    }
+}
+```
+
+**Security considerations**:
+- Pre-claim ops execute before settlement
+- Must validate signatures properly
+- Gas stipend limits execution time
+- Failure reverts entire transaction
+
+## Reentrancy Protection
+
+All external Router functions are protected against reentrancy.
+
+### ReentrancyGuardTransient
+
+From RouterLogic.sol:74:
+
+```solidity
+contract RouterLogic is IRouter, RouterManager, DirectRoutes, ReentrancyGuardTransient {
+    // ...
+}
+```
+
+Used on all entry points:
+
+```solidity
+function optimized_routeFill921336808(...) 
+    public 
+    payable 
+    virtual 
+    nonReentrant  // ← Protection
+{
+    // ...
+}
+
+function routeClaim(...) 
+    external 
+    payable 
+    nonReentrant  // ← Protection
+{
+    // ...
+}
+```
+
+<Tip>
+  Transient reentrancy guard uses TSTORE/TLOAD (EIP-1153) for gas efficiency when available.
+</Tip>
+
+## Adapter Development Guidelines
+
+### Required Implementations
+
+From AdapterBase.sol:23-60:
+
+<Steps>
+  <Step title="Return Function Selectors">
+    All fill/claim functions MUST return their own selector:
+    ```solidity
+    function myFill(...) external returns(bytes4) {
+        // implementation
+        return this.myFill.selector;
+    }
+    ```
+  </Step>
+  
+  <Step title="Implement supportsInterface">
+    Add all selectors to IERC165 implementation:
+    ```solidity
+    function supportsInterface(bytes4 interfaceId) public pure override returns (bool) {
+        return interfaceId == this.myFill.selector ||
+               interfaceId == this.myClaim.selector ||
+               super.supportsInterface(interfaceId);
+    }
+    ```
+  </Step>
+  
+  <Step title="Use onlyViaRouter">
+    Protect all fill/claim functions:
+    ```solidity
+    function myFill(...) external onlyViaRouter returns(bytes4) {
+        // ...
+    }
+    ```
+  </Step>
+  
+  <Step title="Avoid Untrusted Calls">
+    Never call untrusted external contracts:
+    ```solidity
+    // ❌ NEVER DO THIS
+    untrustedContract.arbitraryCall(userProvidedData);
+    
+    // ✓ Only call audited protocols
+    IUniswapV3Router(TRUSTED_ROUTER).swap(params);
+    ```
+  </Step>
+</Steps>
+
+### Storage Safety
+
+From AdapterBase.sol:39:
+
+```solidity
+/**
+ * 2. SECURITY REQUIREMENTS:
+ *    - NEVER make direct calls to untrusted external contracts
+ *    - Remember: adapters run in Router's context via delegatecall
+ *    - Any storage writes affect Router's storage, not adapter's storage
+ */
+```
+
+<Warning>
+  Storage variables in adapters write to Router's storage during delegatecall. Use immutable variables or be extremely careful with storage layout.
+</Warning>
+
+## Pre-Funding Security
+
+Same-chain settlements use pre-funding to prevent manipulation attacks.
+
+### Pre-Funding Pattern
+
+From SameChainAdapter.sol:233-246:
+
+```solidity
+function _handleCompactFill(FillDataCompact calldata fillData, address tokenInRecipient) internal {
+    // 1. Pre-fund BEFORE claiming input tokens
+    _prefundRecipient({ 
+        from: msg.sender, 
+        to: fillData.order.recipient, 
+        tokenOut: fillData.order.tokenOut 
+    });
+    
+    // 2. Then claim input tokens via arbiter
+    SameChainArbiter(ARBITER).handleCompact_NotarizedChain({
+        order: fillData.order,
+        sigs: fillData.userSigs,
+        // ...
+    });
+}
+```
+
+**Security properties**:
+
+1. **Atomic execution**: If arbiter fails, pre-funding reverts
+2. **Front-run protection**: Recipients get outputs before inputs unlock
+3. **MEV resistance**: Prevents sandwich attacks on settlements
+
+## Gas Stipend Validation
+
+From ArbiterBase.sol:118-125:
+
+```solidity
+function _requireValidGasLeft(uint128 minGas) private view {
+    if (minGas > 0) {
+        // Account for EIP-150's 63/64 rule
+        uint256 requiredGas = uint256(minGas) + (uint256(minGas) / 63) + 10_000;
+        if (gasleft() < requiredGas) {
+            revert InsufficientGasForMinGas(requiredGas, gasleft());
+        }
+    }
+}
+```
+
+**Protects against**:
+- Griefing attacks with insufficient gas
+- Failed operations due to gas underestimation
+- EIP-150 gas forwarding limits
+
+## Security Checklist
+
+<AccordionGroup>
+  <Accordion title="For Adapter Developers">
+    - [ ] All fill/claim functions use `onlyViaRouter` modifier
+    - [ ] All functions return their own selector
+    - [ ] `supportsInterface` includes all selectors
+    - [ ] No direct calls to untrusted contracts
+    - [ ] No storage variables (use immutable only)
+    - [ ] Only interact with audited protocols
+    - [ ] Proper relayer context validation
+  </Accordion>
+  
+  <Accordion title="For Router Operators">
+    - [ ] Atomic fill signer is secure (hardware wallet/multisig)
+    - [ ] Only install audited adapters
+    - [ ] Adapter adder role is restricted
+    - [ ] Adapter remover role can respond to emergencies
+    - [ ] Regular security audits scheduled
+    - [ ] Monitoring for suspicious activity
+  </Accordion>
+  
+  <Accordion title="For Solvers">
+    - [ ] Validate all order signatures off-chain first
+    - [ ] Check token balances before settlement
+    - [ ] Monitor for gas price attacks
+    - [ ] Implement slippage protection
+    - [ ] Use secure key management
+    - [ ] Monitor for failed transactions
+  </Accordion>
+</AccordionGroup>
+
+## Audit Resources
+
+<CardGroup cols={2}>
+  <Card title="Router Security" icon="shield-halved">
+    Core routing logic with atomic signatures and reentrancy protection
+  </Card>
+  <Card title="Adapter Security" icon="plug">
+    Delegatecall context and trusted protocol integration
+  </Card>
+  <Card title="Arbiter Security" icon="scale-balanced">
+    Access control and settlement validation
+  </Card>
+  <Card title="Pre-Funding" icon="lock">
+    Atomic settlement and MEV protection
+  </Card>
+</CardGroup>

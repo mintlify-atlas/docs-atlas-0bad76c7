@@ -1,0 +1,473 @@
+---
+title: Arbiters
+description: Understanding the arbiter layer and resource unlocking
+---
+
+## Overview
+
+Arbiters are specialized contracts that handle settlement validation and resource unlocking for different protocols. They validate user signatures, unlock input tokens, and coordinate target operation execution.
+
+<Note>
+Arbiters are called by adapters to perform the actual settlement logic after pre-funding or other preparation steps are complete.
+</Note>
+
+## Arbiter Architecture
+
+### ArbiterBase
+
+All arbiters inherit from `ArbiterBase`, which provides protocol integration:
+
+```solidity ArbiterBase.sol
+abstract contract ArbiterBase {
+    address public immutable ROUTER;
+    address public immutable COMPACT;
+    address public immutable EXECUTOR;
+    address public immutable ADDRESS_BOOK;
+    
+    modifier onlyRouter() {
+        require(msg.sender == ROUTER, OnlyRouter());
+        _;
+    }
+    
+    constructor(address router, address compact, address addressBook) {
+        ROUTER = router;
+        COMPACT = compact;
+        ADDRESS_BOOK = addressBook;
+        EXECUTOR = IAddressBook(addressBook).intentExecutor();
+    }
+}
+```
+
+**Key Components:**
+
+<CardGroup cols={2}>
+  <Card title="Router Access Control" icon="shield">
+    Only Router can call arbiter functions via `onlyRouter` modifier
+  </Card>
+  <Card title="Protocol Integration" icon="link">
+    Immutable references to Compact, Executor, and AddressBook
+  </Card>
+  <Card title="Signature Validation" icon="signature">
+    Validates user signatures before resource movements
+  </Card>
+  <Card title="Resource Unlocking" icon="unlock">
+    Claims user tokens from protocols (Compact, Permit2)
+  </Card>
+</CardGroup>
+
+## Settlement Flow
+
+Arbiters orchestrate the settlement process in coordination with adapters:
+
+<Steps>
+  <Step title="Pre-Funding (Adapter)">
+    Adapter pre-funds recipient with output tokens before calling arbiter
+  </Step>
+  <Step title="Signature Validation (Arbiter)">
+    Arbiter validates user signatures and order metadata
+  </Step>
+  <Step title="Pre-Claim Operations (Arbiter)">
+    Execute any required setup operations (approvals, configurations)
+  </Step>
+  <Step title="Resource Unlock (Arbiter)">
+    Unlock and transfer user's input tokens to solver
+  </Step>
+  <Step title="Target Execution (Arbiter)">
+    Execute user-specified operations (swaps, transfers)
+  </Step>
+</Steps>
+
+## SameChainArbiter
+
+Handles same-chain settlements for both Compact and Permit2 protocols:
+
+### Compact Settlement
+
+```solidity SameChainArbiter.sol
+function handleCompact_NotarizedChain(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements,
+    bytes calldata allocatorData,
+    address relayer
+) external onlyRouter returns (address sponsor, uint256 nonce) {
+    sponsor = order.sponsor;
+    nonce = order.nonce;
+    
+    // Ensure order hasn't expired
+    require(order.fillDeadline >= block.timestamp, OrderExpired());
+    
+    // STEP 1: Pre-claim validation and execution
+    bytes32 mandateHash = _compactPreClaimOps(
+        order,
+        sigs,
+        otherElements,
+        0,
+        block.chainid
+    );
+    
+    // STEP 2: Resource unlock and deposit to relayer
+    _unlockNotarizedChain({
+        order: order,
+        otherElements: otherElements,
+        originChainSig: sigs.notarizedClaimSig,
+        allocatorData: allocatorData,
+        depositor: relayer,
+        mandateHash: mandateHash
+    });
+    
+    // STEP 3: Execute target operations
+    if (order.targetOps.data.length != 0) {
+        address recipient = order.recipient;
+        SmartExecutionLib.SigMode targetOpsSigMode = order.targetOps.extractSigMode();
+        bool sigModeMatch = (
+            order.preClaimOps.data.length == 0 || 
+            targetOpsSigMode == order.preClaimOps.extractSigMode()
+        );
+        
+        if (
+            recipient == sponsor && 
+            !targetOpsSigMode.isExecutionEmissary() && 
+            sigModeMatch
+        ) {
+            EXECUTOR.executeOpsWithoutSignature(recipient, order.targetOps);
+        }
+    }
+}
+```
+
+<Accordion title="Step-by-Step Breakdown">
+  **STEP 1: Pre-Claim Validation**
+  - Validates order signatures and metadata
+  - Executes pre-claim operations (approvals, setup)
+  - Generates mandate hash for resource unlock
+  - Ensures prerequisites before claiming
+  
+  **STEP 2: Resource Unlock**
+  - Validates signatures against mandate hash
+  - Unlocks user's input tokens from Compact
+  - Transfers tokens directly to relayer address
+  - Returns claim hash for tracking
+  
+  **STEP 3: Target Operations**
+  - Checks execution conditions (recipient == sponsor, etc.)
+  - Executes user-specified operations without additional signatures
+  - Uses trusted execution pattern for gas efficiency
+  - Maintains atomic execution guarantees
+</Accordion>
+
+### Permit2 Settlement
+
+Streamlined flow for Permit2-based orders:
+
+```solidity SameChainArbiter.sol
+function handlePermit2(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    address relayer
+) external onlyRouter returns (address sponsor, uint256 nonce) {
+    sponsor = order.sponsor;
+    nonce = order.nonce;
+    
+    require(order.fillDeadline >= block.timestamp, OrderExpired());
+    
+    // STEP 1: Pre-claim validation (simplified for Permit2)
+    bytes32 mandateHash = _permit2PreClaimOps(order, sigs);
+    
+    // STEP 2: Resource unlock via Permit2
+    _unlockPermit2({
+        order: order,
+        sig: sigs.notarizedClaimSig,
+        depositor: relayer,
+        mandateHash: mandateHash
+    });
+    
+    // STEP 3: Execute target operations
+    if (order.targetOps.data.length != 0) {
+        address recipient = order.recipient;
+        SmartExecutionLib.SigMode targetOpsSigMode = order.targetOps.extractSigMode();
+        bool sigModeMatch = (
+            order.preClaimOps.data.length == 0 || 
+            targetOpsSigMode == order.preClaimOps.extractSigMode()
+        );
+        
+        if (
+            recipient == sponsor && 
+            !targetOpsSigMode.isExecutionEmissary() && 
+            sigModeMatch
+        ) {
+            EXECUTOR.executeOpsWithoutSignature(recipient, order.targetOps);
+        }
+    }
+}
+```
+
+<Info>
+Permit2 settlement is more gas-efficient than Compact due to simplified validation and unlock process, making it optimal for straightforward token operations.
+</Info>
+
+## Trusted Execution Pattern
+
+Arbiters use a trusted execution model for target operations:
+
+<Tabs>
+  <Tab title="Security Model">
+    ```solidity
+    // SameChainArbiter is whitelisted in IntentExecutor
+    // This enables executeOpsWithoutSignature after initial validation
+    
+    EXECUTOR.executeOpsWithoutSignature(
+        recipient,
+        order.targetOps
+    );
+    ```
+    
+    **Benefits:**
+    - Avoids redundant signature validation (already done in pre-claim)
+    - Reduces gas costs significantly
+    - Maintains security through initial validation gate
+  </Tab>
+  <Tab title="Execution Conditions">
+    ```solidity
+    // Target operations only execute when ALL conditions met:
+    
+    1. targetOps.data.length != 0  // Operations specified
+    2. recipient == sponsor         // Self-execution pattern
+    3. !isExecutionEmissary()      // Not delegated execution
+    4. sigModeMatch                // Signature modes align
+    ```
+  </Tab>
+  <Tab title="Gas Savings">
+    ```solidity
+    // Traditional flow:
+    // 1. Pre-claim sig validation
+    // 2. Resource unlock sig validation
+    // 3. Target ops sig validation ❌ Expensive
+    
+    // Trusted execution:
+    // 1. Pre-claim sig validation ✅
+    // 2. Resource unlock sig validation ✅
+    // 3. executeOpsWithoutSignature ✅ Gas efficient
+    ```
+  </Tab>
+</Tabs>
+
+## Protocol-Specific Validation
+
+### Compact Pre-Claim
+
+```solidity
+function _compactPreClaimOps(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements,
+    uint256 preClaimGasStipend,
+    uint256 notarizedChainId
+) internal returns (bytes32 mandateHash) {
+    // Validate signatures and metadata
+    // Execute pre-claim operations with gas stipend
+    // Generate mandate hash for resource unlock
+}
+```
+
+**Features:**
+- Complex signature validation
+- Pre-claim operation execution
+- Gas stipend allocation
+- Allocator data handling
+
+### Permit2 Pre-Claim
+
+```solidity
+function _permit2PreClaimOps(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs
+) internal returns (bytes32 mandateHash) {
+    // Simplified signature validation
+    // Generate mandate hash
+}
+```
+
+**Features:**
+- Simplified validation
+- No pre-claim operations
+- Lower gas overhead
+
+## Resource Unlocking
+
+### Compact Unlock
+
+```solidity
+function _unlockNotarizedChain(
+    Types.Order calldata order,
+    bytes32[] calldata otherElements,
+    bytes calldata originChainSig,
+    bytes calldata allocatorData,
+    address depositor,
+    bytes32 mandateHash
+) internal returns (bytes32 claimHash) {
+    // Validate against mandate hash
+    // Unlock tokens from Compact protocol
+    // Transfer to depositor (relayer)
+}
+```
+
+### Permit2 Unlock
+
+```solidity
+function _unlockPermit2(
+    Types.Order calldata order,
+    bytes calldata sig,
+    address depositor,
+    bytes32 mandateHash
+) internal {
+    // Validate Permit2 signature
+    // Transfer tokens to depositor
+}
+```
+
+## Dual Protocol Support
+
+<Tabs>
+  <Tab title="Compact">
+    **Use Case:** Complex multi-step settlements
+    
+    **Features:**
+    - Pre-claim operations
+    - Gas stipend allocation  
+    - Allocator integration
+    - Multi-signature support
+    - Cross-chain coordination
+    
+    **When to Use:**
+    - Complex settlement flows
+    - Multi-element orders
+    - Cross-chain operations
+    - Advanced authorization
+  </Tab>
+  <Tab title="Permit2">
+    **Use Case:** Simple token operations
+    
+    **Features:**
+    - Simplified validation
+    - Direct token authorization
+    - Lower gas costs
+    - Streamlined flow
+    
+    **When to Use:**
+    - Simple token transfers
+    - Basic swaps
+    - Gas-sensitive operations
+    - Single-chain settlements
+  </Tab>
+</Tabs>
+
+## Security Model
+
+<Warning>
+**Critical Security Features:**
+
+- **Access Control**: Only Router can call arbiter functions
+- **Signature Validation**: All user signatures validated before asset movements
+- **Atomic Execution**: Entire settlement succeeds or reverts together
+- **Deadline Enforcement**: Orders expire after `fillDeadline`
+- **Trusted Execution**: Whitelist-based execution without redundant signatures
+</Warning>
+
+### Access Control
+
+```solidity ArbiterBase.sol
+modifier onlyRouter() {
+    require(msg.sender == ROUTER, OnlyRouter());
+    _;
+}
+```
+
+Only the designated Router can call arbiter settlement functions.
+
+### Atomicity Guarantees
+
+If any step fails, the entire transaction reverts:
+
+```solidity
+// If signature validation fails → revert (pre-funding also reverted)
+// If resource unlock fails → revert
+// If target operations fail → revert
+```
+
+## Integration Example
+
+How adapters integrate with arbiters:
+
+```solidity SameChainAdapter.sol
+function _handleCompactFill(
+    FillDataCompact calldata fillData,
+    address tokenInRecipient
+) internal {
+    // 1. Pre-fund recipient (adapter responsibility)
+    _prefundRecipient({
+        from: msg.sender,
+        to: fillData.order.recipient,
+        tokenOut: fillData.order.tokenOut
+    });
+    
+    // 2. Call arbiter for settlement (arbiter responsibility)
+    (address sponsor, uint256 nonce) = SameChainArbiter(ARBITER)
+        .handleCompact_NotarizedChain({
+            order: fillData.order,
+            sigs: fillData.userSigs,
+            otherElements: fillData.otherElements,
+            allocatorData: fillData.allocatorData,
+            relayer: tokenInRecipient
+        });
+    
+    // 3. Emit event (adapter responsibility)
+    emit RouterFilled(sponsor, nonce);
+}
+```
+
+## Target Operation Execution
+
+Arbiters coordinate with IntentExecutor for final operations:
+
+```solidity
+if (order.targetOps.data.length != 0) {
+    address recipient = order.recipient;
+    SmartExecutionLib.SigMode targetOpsSigMode = order.targetOps.extractSigMode();
+    bool sigModeMatch = (
+        order.preClaimOps.data.length == 0 || 
+        targetOpsSigMode == order.preClaimOps.extractSigMode()
+    );
+    
+    // Only execute if conditions are met
+    if (
+        recipient == sponsor &&           // Self-execution
+        !targetOpsSigMode.isExecutionEmissary() &&  // Not delegated
+        sigModeMatch                      // Sig modes align
+    ) {
+        EXECUTOR.executeOpsWithoutSignature(recipient, order.targetOps);
+    }
+}
+```
+
+**Execution Conditions:**
+
+1. **Target ops exist**: `targetOps.data.length != 0`
+2. **Self-execution**: `recipient == sponsor`
+3. **Not emissary**: `!isExecutionEmissary()`
+4. **Signature mode match**: Pre-claim and target ops use same mode
+
+<Info>
+If conditions aren't met, target operations are skipped (not reverted). This allows for flexible settlement patterns.
+</Info>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Adapters" icon="plug" href="/concepts/adapters">
+    Learn how adapters coordinate with arbiters
+  </Card>
+  <Card title="Intent Execution" icon="gears" href="/concepts/intent-execution">
+    Understand intent executor and ERC-7579 integration
+  </Card>
+</CardGroup>

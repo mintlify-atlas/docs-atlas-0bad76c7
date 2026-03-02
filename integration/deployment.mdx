@@ -1,0 +1,561 @@
+---
+title: "Deployment and Configuration"
+description: "Deploy and configure the Warp Router and custom adapters"
+---
+
+This guide covers deploying the Router system, registering adapters, and configuring the infrastructure for production use.
+
+## Router Deployment
+
+The Router contract is the central hub for all routing operations. It requires three critical addresses during deployment.
+
+### Constructor Parameters
+
+**From `Router.sol:102`:**
+```solidity
+constructor(
+    address atomicFillSigner,
+    address adder,
+    address remover
+) RouterLogic(atomicFillSigner, adder, remover) { }
+```
+
+**Parameters:**
+
+<ParamField path="atomicFillSigner" type="address" required>
+  The address authorized to sign atomic fill batch operations. This address controls all user asset movements through fills and must be carefully secured.
+  
+  - **Security**: Use a hardware wallet or multi-sig for production
+  - **Pausing**: Set to `address(0)` to pause all fill operations
+  - **Immutable**: Cannot be changed after deployment (only via `setAtomicFillSigner`)
+</ParamField>
+
+<ParamField path="adder" type="address" required>
+  The address granted `ADAPTER_ADDER_ROLE` for registering new protocol adapters.
+  
+  - **Permissions**: Can install adapters, perform hotfixes, and pause the router
+  - **Use case**: Governance or operations address
+  - **Role value**: `bytes32(uint256(0x1001))` (from `RouterManager.sol:36`)
+</ParamField>
+
+<ParamField path="remover" type="address" required>
+  The address granted `ADAPTER_REMOVER_ROLE` for disabling problematic adapters.
+  
+  - **Permissions**: Can retire adapters that are compromised or deprecated
+  - **Use case**: Emergency operations or governance address  
+  - **Role value**: `bytes32(uint256(0x1002))` (from `RouterManager.sol:40`)
+</ParamField>
+
+### Deployment Example
+
+<Steps>
+  <Step title="Prepare deployment parameters">
+    Set up your addresses:
+
+    ```solidity
+    // For production: Use secure addresses
+    address atomicSigner = 0x...; // Hardware wallet or multi-sig
+    address governance = 0x...;   // Governance contract
+    address operations = 0x...;   // Operations multi-sig
+    
+    // For testing: Can use EOAs
+    address atomicSigner = deployer;
+    address governance = deployer;
+    address operations = deployer;
+    ```
+  </Step>
+
+  <Step title="Deploy Router">
+    Deploy the Router contract:
+
+    ```solidity
+    Router router = new Router(
+        atomicSigner,  // Signs atomic batches
+        governance,    // Can add/hotfix adapters
+        operations     // Can remove adapters
+    );
+    ```
+  </Step>
+
+  <Step title="Verify deployment">
+    Check the deployment:
+
+    ```solidity
+    // Verify atomic signer
+    assertEq(router.$atomicFillSigner(), atomicSigner);
+    
+    // Verify roles
+    assertTrue(router.hasRole(ADD_ROLE, governance));
+    assertTrue(router.hasRole(RM_ROLE, operations));
+    ```
+  </Step>
+</Steps>
+
+### Storage Layout
+
+The Router uses a custom storage layout for deterministic state management:
+
+**From `Router.sol:62`:**
+```solidity
+contract Router layout at 88_967_819_156_726_863_884_428_300_865_593_401_225_272_190_543_010_065_736_923_496_773_938_567_778_360
+```
+
+This ensures:
+- Predictable storage slots across deployments
+- Compatibility with proxy patterns
+- Consistent cross-chain deployments
+
+## Adapter Deployment
+
+Custom adapters require specific parameters and proper registration with the Router.
+
+### Adapter Constructor Parameters
+
+Most adapters follow this pattern (from `AdapterBase.sol:82-89`):
+
+```solidity
+constructor(
+    address router,   // Router contract address
+    address arbiter   // Arbiter contract address (or address(0))
+)
+    AdapterBase(router, arbiter)
+    SemVer(majorVersion, minorVersion)
+{ }
+```
+
+### Example: SameChainAdapter
+
+**From `SameChainAdapter.sol:137-146`:**
+```solidity
+constructor(
+    address router,
+    address compact,
+    address arbiter,
+    address addressBook
+)
+    AdapterBasePrefund(router, arbiter)
+    SemVer(Version.SAMECHAIN_VERSION_MINOR, Version.SAMECHAIN_VERSION_PATCH)
+    SameChainArbiter(router, compact, addressBook)
+{ }
+```
+
+<Steps>
+  <Step title="Deploy dependencies">
+    Deploy required contracts:
+
+    ```solidity
+    // Deploy arbiter if needed
+    SameChainArbiter arbiter = new SameChainArbiter(
+        address(router),
+        compactAddress,
+        addressBookAddress
+    );
+    ```
+  </Step>
+
+  <Step title="Deploy adapter">
+    Deploy the adapter:
+
+    ```solidity
+    SameChainAdapter adapter = new SameChainAdapter(
+        address(router),
+        compactAddress,
+        address(arbiter),
+        addressBookAddress
+    );
+    ```
+  </Step>
+
+  <Step title="Verify adapter">
+    Check adapter configuration:
+
+    ```solidity
+    // Check router reference
+    assertEq(adapter._ROUTER(), address(router));
+    
+    // Check arbiter
+    assertEq(adapter.ARBITER(), address(arbiter));
+    
+    // Check interface support
+    assertTrue(adapter.supportsInterface(
+        type(IAdapter).interfaceId
+    ));
+    assertTrue(adapter.supportsInterface(
+        adapter.samechain_compact_handleFill.selector
+    ));
+    ```
+  </Step>
+</Steps>
+
+## Adapter Registration
+
+Once deployed, adapters must be registered with the Router to enable routing.
+
+### Installing Fill Adapters
+
+Use `installFillAdapter` to register adapters for fill operations.
+
+**From `RouterManager.sol:106-117`:**
+```solidity
+function installFillAdapter(
+    bytes2 protocolVersion,
+    bytes4 selector,
+    address adapter
+) external onlyRole(ADD_ROLE)
+```
+
+<ParamField path="protocolVersion" type="bytes2" required>
+  The semantic version (major.minor) for the adapter. Format: `0xMMmm` where `MM` is major, `mm` is minor.
+  
+  - Example: `0x0100` = version 1.0
+  - Example: `0x0001` = version 0.1
+  - Must match adapter's major version (from `RouterManager.sol:108`)
+</ParamField>
+
+<ParamField path="selector" type="bytes4" required>
+  The function selector that the adapter implements.
+  
+  - Must be supported by the adapter's `supportsInterface`
+  - Used for routing calls to this adapter
+  - Can register multiple selectors per adapter
+</ParamField>
+
+<ParamField path="adapter" type="address" required>
+  The deployed adapter contract address.
+  
+  - Must implement `IAdapter` interface
+  - Must support the provided selector via ERC165
+  - Must have valid ARBITER address
+</ParamField>
+
+**Example:**
+```solidity
+// Install SameChainAdapter for Compact fills
+vm.prank(governance);
+router.installFillAdapter(
+    0x0001,  // Version 0.1
+    ISameChainAdapter.samechain_compact_handleFill.selector,
+    address(sameChainAdapter)
+);
+
+// Install for Permit2 fills
+vm.prank(governance);
+router.installFillAdapter(
+    0x0001,  // Version 0.1
+    ISameChainAdapter.samechain_permit2_handleFill.selector,
+    address(sameChainAdapter)
+);
+```
+
+### Installing Claim Adapters
+
+Use `installClaimAdapter` for claim operations:
+
+**From `RouterManager.sol:176-186`:**
+```solidity
+vm.prank(governance);
+router.installClaimAdapter(
+    0x0001,  // Version 0.1
+    IAdapter.claimFunds.selector,
+    address(adapter)
+);
+```
+
+### Verification
+
+Verify adapter installation:
+
+```solidity
+// Check fill adapter
+(address installedAdapter, bytes12 tag) = router.getFillAdapter(
+    0x0001,  // Version
+    ISameChainAdapter.samechain_compact_handleFill.selector
+);
+assertEq(installedAdapter, address(sameChainAdapter));
+
+// Check claim adapter
+(address claimAdapter, bytes12 claimTag) = router.getClaimAdapter(
+    0x0001,
+    IAdapter.claimFunds.selector
+);
+assertEq(claimAdapter, address(adapter));
+```
+
+## Adapter Upgrades
+
+The Router supports safe adapter upgrades through semantic versioning.
+
+### Hotfix Adapters
+
+For patch-only updates (from `RouterManager.sol:132-142`):
+
+<Steps>
+  <Step title="Deploy new adapter">
+    Deploy the updated adapter with incremented patch version:
+
+    ```solidity
+    // Old: SemVer(0, 1) - version 0.1
+    // New: SemVer(0, 2) - version 0.2 (patch increment)
+    MyAdapter newAdapter = new MyAdapter(
+        address(router),
+        address(arbiter)
+    );
+    ```
+  </Step>
+
+  <Step title="Apply hotfix">
+    Use `hotfixFillAdapter` for patch updates:
+
+    ```solidity
+    vm.prank(governance);
+    router.hotfixFillAdapter(
+        0x0001,  // Same version (0.1)
+        adapter.myFill.selector,
+        address(newAdapter)
+    );
+    ```
+
+    This validates:
+    - An adapter is already installed (from `RouterManager.sol:138`)
+    - New version is only a patch upgrade (from `RouterManager.sol:141`)
+  </Step>
+</Steps>
+
+### Force Hotfix
+
+For breaking changes (use with caution):
+
+```solidity
+// Deploy adapter with major/minor version change
+MyAdapter newAdapter = new MyAdapter(router, arbiter); // SemVer(1, 0)
+
+vm.prank(governance);
+router.forceHotfixFillAdapter(
+    0x0100,  // New version 1.0
+    adapter.myFill.selector,
+    address(newAdapter)
+);
+```
+
+**Warning from `RouterManager.sol:156`:** Bypasses semantic versioning validation and can introduce breaking changes.
+
+### Installing New Versions
+
+Install a new major/minor version alongside the old one:
+
+```solidity
+// Old version 0.1 remains active
+(address v01,) = router.getFillAdapter(0x0001, selector);
+
+// Install new version 1.0
+vm.prank(governance);
+router.installFillAdapter(
+    0x0100,  // Version 1.0
+    adapter.myFill.selector,
+    address(newAdapter)
+);
+
+// Both versions now available
+(address v10,) = router.getFillAdapter(0x0100, selector);
+assertEq(v01, address(oldAdapter));
+assertEq(v10, address(newAdapter));
+```
+
+## Removing Adapters
+
+Retire compromised or deprecated adapters:
+
+**From `RouterManager.sol:268-282`:**
+```solidity
+vm.prank(operations);
+router.retireFillAdapter(
+    0x0001,  // Version to retire
+    adapter.myFill.selector
+);
+
+// Verify removal
+(address retired,) = router.getFillAdapter(0x0001, selector);
+assertEq(retired, address(0));
+```
+
+## Token Approvals
+
+Set token approvals for adapters that need to interact with protocols:
+
+**From `RouterManager.sol:387-393`:**
+```solidity
+vm.prank(governance);
+router.setTokenApproval(
+    address(adapter),
+    address(usdc),
+    type(uint256).max
+);
+```
+
+This:
+1. Reads the adapter's `settlementLayerSpender()` (from `IAdapter.sol:8`)
+2. Approves that spender to spend the Router's tokens
+3. Enables the adapter to interact with external protocols
+
+## Pausing the Router
+
+Pause all fill operations in an emergency:
+
+**From `RouterManager.sol:79-82`:**
+```solidity
+vm.prank(governance);
+router.pauseRouter();
+
+// Verify paused
+assertEq(router.$atomicFillSigner(), address(0));
+```
+
+This sets the atomic fill signer to `address(0)`, preventing all fill operations while allowing claims to continue.
+
+### Unpausing
+
+Restore operations by setting a new signer:
+
+```solidity
+vm.prank(governance);
+router.setAtomicFillSigner(newSignerAddress);
+```
+
+## Role Management
+
+Manage access control roles using OpenZeppelin's AccessControl:
+
+### Granting Roles
+
+```solidity
+// Grant ADD_ROLE to new governance
+vm.prank(currentGovernance);
+router.grantRole(ADD_ROLE, newGovernance);
+
+// Grant RM_ROLE to operations team
+vm.prank(currentGovernance);
+router.grantRole(RM_ROLE, operationsMultisig);
+```
+
+### Revoking Roles
+
+```solidity
+// Revoke old governance
+vm.prank(currentGovernance);
+router.revokeRole(ADD_ROLE, oldGovernance);
+```
+
+### Checking Roles
+
+```solidity
+bool hasAddRole = router.hasRole(ADD_ROLE, address);
+bool hasRmRole = router.hasRole(RM_ROLE, address);
+```
+
+## Production Deployment Checklist
+
+<Steps>
+  <Step title="Security setup">
+    - [ ] Use hardware wallet or multi-sig for atomic signer
+    - [ ] Use governance contract for ADD_ROLE
+    - [ ] Use operations multi-sig for RM_ROLE
+    - [ ] Verify all addresses on testnet first
+  </Step>
+
+  <Step title="Deploy contracts">
+    - [ ] Deploy Router with production addresses
+    - [ ] Deploy all required arbiters
+    - [ ] Deploy all adapters
+    - [ ] Verify all contracts on block explorer
+  </Step>
+
+  <Step title="Register adapters">
+    - [ ] Install all fill adapters
+    - [ ] Install all claim adapters
+    - [ ] Set required token approvals
+    - [ ] Verify registrations
+  </Step>
+
+  <Step title="Testing">
+    - [ ] Test fills on testnet
+    - [ ] Test claims on testnet
+    - [ ] Test batch operations
+    - [ ] Test pause/unpause
+    - [ ] Run gas benchmarks
+  </Step>
+
+  <Step title="Monitoring">
+    - [ ] Set up event monitoring
+    - [ ] Configure alerting for errors
+    - [ ] Monitor gas costs
+    - [ ] Track adapter performance
+  </Step>
+</Steps>
+
+## Deployment Scripts
+
+Example deployment script:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "forge-std/Script.sol";
+import { Router } from "../src/router/Router.sol";
+import { SameChainAdapter } from "../src/arbiters/samechain/SameChainAdapter.sol";
+
+contract DeployRouter is Script {
+    function run() external {
+        // Load environment variables
+        address atomicSigner = vm.envAddress("ATOMIC_SIGNER");
+        address governance = vm.envAddress("GOVERNANCE");
+        address operations = vm.envAddress("OPERATIONS");
+        
+        vm.startBroadcast();
+        
+        // Deploy Router
+        Router router = new Router(
+            atomicSigner,
+            governance,
+            operations
+        );
+        console.log("Router deployed at:", address(router));
+        
+        // Deploy SameChainAdapter
+        SameChainAdapter adapter = new SameChainAdapter(
+            address(router),
+            vm.envAddress("COMPACT"),
+            vm.envAddress("ARBITER"),
+            vm.envAddress("ADDRESS_BOOK")
+        );
+        console.log("SameChainAdapter deployed at:", address(adapter));
+        
+        vm.stopBroadcast();
+        
+        // Log next steps
+        console.log("\nNext steps:");
+        console.log("1. Verify contracts on block explorer");
+        console.log("2. Install adapters via governance");
+        console.log("3. Set token approvals if needed");
+    }
+}
+```
+
+Run with:
+```bash
+forge script script/DeployRouter.s.sol:DeployRouter \
+  --rpc-url $RPC_URL \
+  --broadcast \
+  --verify
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Solver Integration" icon="robot" href="/integration/solvers">
+    Learn how to integrate as a solver
+  </Card>
+  <Card title="Building Adapters" icon="puzzle-piece" href="/integration/building-adapters">
+    Build custom adapters for new protocols
+  </Card>
+</CardGroup>

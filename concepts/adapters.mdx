@@ -1,0 +1,411 @@
+---
+title: Adapters
+description: Understanding the adapter architecture and delegatecall pattern
+---
+
+## Overview
+
+Adapters are protocol-specific settlement contracts that handle fill and claim operations through the Router. They use a delegatecall pattern to execute in the Router's context, enabling modular protocol support without contract upgrades.
+
+<Note>
+Adapters are **always** executed via delegatecall from the Router, meaning they run in the Router's storage and balance context.
+</Note>
+
+## Adapter Architecture
+
+### AdapterBase
+
+All adapters inherit from `AdapterBase`, which provides foundational functionality:
+
+```solidity AdapterBase.sol
+abstract contract AdapterBase is IAdapter, SemVer {
+    address public immutable _ROUTER;
+    address public immutable ARBITER;
+    
+    constructor(address router, address arbiter) {
+        _ROUTER = router;
+        ARBITER = (arbiter == address(0)) ? address(this) : arbiter;
+    }
+    
+    modifier onlyViaRouter() {
+        require(address(this) == _ROUTER, OnlyDelegateCall());
+        _;
+    }
+}
+```
+
+**Key Components:**
+
+<CardGroup cols={2}>
+  <Card title="Router Reference" icon="route">
+    Immutable reference to the Router contract for security validation
+  </Card>
+  <Card title="Arbiter Reference" icon="scale-balanced">
+    Arbiter contract responsible for settlement validation
+  </Card>
+  <Card title="onlyViaRouter Modifier" icon="shield">
+    Ensures functions are only called via Router delegatecall
+  </Card>
+  <Card title="Relayer Context" icon="database">
+    Access to solver-specific context data
+  </Card>
+</CardGroup>
+
+## Delegatecall Pattern
+
+Adapters use delegatecall to execute in the Router's context:
+
+```solidity AdapterLib.sol
+function callAdapterWithRelayerContext(
+    address adapter,
+    bytes calldata relayerContext,
+    bytes calldata adapterCalldata
+) internal returns (bytes4 ret) {
+    assembly ("memory-safe") {
+        let adapterDataLen := adapterCalldata.length
+        let contextLen := relayerContext.length
+        let totalSize := add(adapterDataLen, add(contextLen, 0x20))
+        
+        let freeMemPtr := mload(0x40)
+        let dataPtr := freeMemPtr
+        
+        // Copy adapter calldata to memory
+        calldatacopy(dataPtr, adapterCalldata.offset, adapterDataLen)
+        
+        // Copy relayer context after adapter calldata
+        let contextPtr := add(dataPtr, adapterDataLen)
+        calldatacopy(contextPtr, relayerContext.offset, contextLen)
+        
+        // Append context length as uint256
+        mstore(add(contextPtr, contextLen), contextLen)
+        
+        // Perform delegatecall
+        let success := delegatecall(
+            gas(),
+            adapter,
+            dataPtr,
+            totalSize,
+            0x00,
+            0x00
+        )
+        
+        if iszero(success) {
+            revert(0x00, 0x04)
+        }
+        
+        returndatacopy(0x00, 0x00, 0x20)
+        ret := mload(0x00)
+    }
+}
+```
+
+### Delegatecall Security Model
+
+<Warning>
+**Critical Security Implications:**
+
+- Adapters execute with Router's storage and balance
+- `msg.sender` and `msg.value` are preserved from original call
+- `address(this)` equals Router address during execution
+- Storage writes affect Router's state, not adapter's state
+- Never make direct calls to untrusted contracts from adapters
+</Warning>
+
+<Tabs>
+  <Tab title="Execution Context">
+    ```solidity
+    // During delegatecall:
+    address(this) == ROUTER_ADDRESS  // ✅ True
+    msg.sender == ORIGINAL_CALLER    // ✅ Preserved
+    msg.value == ORIGINAL_VALUE      // ✅ Preserved
+    
+    // Storage operations:
+    storage = ROUTER_STORAGE         // ⚠️ Writes to Router!
+    ```
+  </Tab>
+  <Tab title="Security Validation">
+    ```solidity AdapterBase.sol
+    modifier onlyViaRouter() {
+        // When called via delegatecall from Router:
+        // address(this) == _ROUTER ✅
+        require(address(this) == _ROUTER, OnlyDelegateCall());
+        _;
+    }
+    ```
+  </Tab>
+  <Tab title="Wrong Usage">
+    ```solidity
+    // ❌ WRONG: Direct call bypasses security
+    adapter.handleFill(data);
+    
+    // ✅ CORRECT: Delegatecall via Router
+    router.routeFill(contexts, calldatas, signature);
+    ```
+  </Tab>
+</Tabs>
+
+## Relayer Context
+
+Adapters receive solver-specific context data appended to calldata:
+
+```solidity AdapterBase.sol
+function _loadRelayerContext() internal pure returns (
+    uint256 contextLength,
+    bytes calldata relayerContext
+) {
+    assembly ("memory-safe") {
+        let totalSize := calldatasize()
+        contextLength := calldataload(sub(totalSize, 0x20))
+        relayerContext.offset := sub(totalSize, add(contextLength, 0x20))
+        relayerContext.length := contextLength
+    }
+}
+```
+
+### Calldata Format
+
+The Router appends relayer context to adapter calldata:
+
+```
+[function_selector][function_params][relayer_context][context_length]
+|<---- 4 bytes --->|<-- variable -->|<-- variable -->|<-- 32 bytes -->|
+```
+
+**Example Usage:**
+
+```solidity SameChainAdapter.sol
+function _tokenInRecipient() internal pure returns (address tokenInRecipient) {
+    (uint256 relayerContextLength, bytes calldata relayerContext) = _loadRelayerContext();
+    require(relayerContextLength == 20, InvalidRelayerContext());
+    return address(bytes20(relayerContext[:20]));
+}
+```
+
+## Adapter Types
+
+### Fill Adapters
+
+Handle settlement operations that fulfill user orders:
+
+```solidity SameChainAdapter.sol
+function samechain_compact_handleFill(
+    FillDataCompact calldata fillData
+) external payable onlyViaRouter returns (bytes4) {
+    // 1. Pre-fund recipient with output tokens
+    _prefundRecipient({
+        from: msg.sender,
+        to: fillData.order.recipient,
+        tokenOut: fillData.order.tokenOut
+    });
+    
+    // 2. Call arbiter to validate and unlock input tokens
+    (address sponsor, uint256 nonce) = SameChainArbiter(ARBITER)
+        .handleCompact_NotarizedChain({
+            order: fillData.order,
+            sigs: fillData.userSigs,
+            otherElements: fillData.otherElements,
+            allocatorData: fillData.allocatorData,
+            relayer: _tokenInRecipient()
+        });
+    
+    emit RouterFilled(sponsor, nonce);
+    return this.samechain_compact_handleFill.selector;
+}
+```
+
+### Claim Adapters
+
+Handle resource unlock operations:
+
+```solidity
+function handleClaim(bytes calldata claimData) 
+    external payable onlyViaRouter returns (bytes4) 
+{
+    // Decode claim parameters
+    (address user, address token, uint256 amount) = 
+        abi.decode(claimData, (address, address, uint256));
+    
+    // Unlock resources from protocol
+    ARBITER.unlockResources(user, token, amount);
+    
+    return this.handleClaim.selector;
+}
+```
+
+## Implementation Requirements
+
+<Steps>
+  <Step title="Inherit from AdapterBase">
+    ```solidity
+    contract MyAdapter is AdapterBase {
+        constructor(address router, address arbiter) 
+            AdapterBase(router, arbiter) 
+        { }
+    }
+    ```
+  </Step>
+  <Step title="Return Function Selector">
+    ```solidity
+    function myFillFunction() external returns (bytes4) {
+        // ... implementation ...
+        return this.myFillFunction.selector;
+    }
+    ```
+  </Step>
+  <Step title="Implement ERC165">
+    ```solidity
+    function supportsInterface(bytes4 selector) 
+        public pure override returns (bool) 
+    {
+        return selector == this.myFillFunction.selector
+            || super.supportsInterface(selector);
+    }
+    ```
+  </Step>
+  <Step title="Use onlyViaRouter">
+    ```solidity
+    function myFillFunction() 
+        external 
+        onlyViaRouter 
+        returns (bytes4) 
+    {
+        // Safe to execute in Router context
+    }
+    ```
+  </Step>
+</Steps>
+
+## Example: IntentExecutorAdapter
+
+A passthrough adapter that forwards calls to an intent executor:
+
+```solidity IntentExecutorAdapter.sol
+contract IntentExecutorAdapter is AdapterBase {
+    address internal immutable EXECUTOR;
+    
+    constructor(address router, address executor) 
+        AdapterBase(router, address(0)) 
+    {
+        EXECUTOR = executor;
+    }
+    
+    function handleFill_intentExecutor_handleCompactTargetOps(
+        bytes calldata executorCalldata
+    ) external payable onlyViaRouter returns (bytes4) {
+        // Forward call to executor
+        EXECUTOR.passthrough(
+            COMPACT_INTENT_SELECTOR,
+            executorCalldata
+        );
+        return this.handleFill_intentExecutor_handleCompactTargetOps.selector;
+    }
+    
+    function supportsInterface(bytes4 selector) 
+        public pure override returns (bool) 
+    {
+        return selector == this.handleFill_intentExecutor_handleCompactTargetOps.selector
+            || super.supportsInterface(selector);
+    }
+}
+```
+
+## Adapter Registration
+
+Adapters are registered with the RouterManager:
+
+<Tabs>
+  <Tab title="Install">
+    ```solidity
+    // Install new adapter
+    routerManager.installFillAdapter(
+        bytes2(0x0001),  // Protocol version
+        bytes4(MyAdapter.myFill.selector),
+        address(myAdapter)
+    );
+    ```
+  </Tab>
+  <Tab title="Hotfix">
+    ```solidity
+    // Apply patch upgrade
+    routerManager.hotfixFillAdapter(
+        bytes2(0x0001),
+        bytes4(MyAdapter.myFill.selector),
+        address(newAdapter)
+    );
+    ```
+  </Tab>
+  <Tab title="Retire">
+    ```solidity
+    // Remove adapter
+    routerManager.retireFillAdapter(
+        bytes2(0x0001),
+        bytes4(MyAdapter.myFill.selector)
+    );
+    ```
+  </Tab>
+</Tabs>
+
+## Adapter Tags
+
+Adapters can specify metadata tags for routing behavior:
+
+```solidity
+function ADAPTER_TAG() external pure virtual returns (bytes12 adapterTag) {
+    // Skip relayer context for this adapter
+    return Constants.DEFAULT_ADAPTER_TAG.setSkipRelayerContext();
+}
+```
+
+<Accordion title="Available Tag Flags">
+  - **SKIP_RELAYER_CONTEXT**: Adapter doesn't consume relayer context
+  - Additional flags can be defined in future versions
+</Accordion>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Validate Delegatecall" icon="shield-check">
+    Always use `onlyViaRouter` modifier on external functions
+  </Card>
+  <Card title="Trusted Protocols Only" icon="handshake">
+    Only integrate with well-audited, trusted protocols
+  </Card>
+  <Card title="Return Selectors" icon="arrow-turn-down-left">
+    All fill/claim functions must return their selector
+  </Card>
+  <Card title="Implement ERC165" icon="list-check">
+    Add all function selectors to `supportsInterface`
+  </Card>
+</CardGroup>
+
+## Gas Optimizations
+
+Adapters can optimize gas usage:
+
+```solidity
+// ✅ Use assembly for calldata operations
+function _loadRelayerContext() internal pure {
+    assembly ("memory-safe") {
+        // Direct calldata access
+    }
+}
+
+// ✅ Cache storage reads
+address arbiter = ARBITER;  // SLOAD once
+
+// ✅ Use unchecked for safe arithmetic
+unchecked {
+    ++i;
+}
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Arbiters" icon="scale-balanced" href="/concepts/arbiters">
+    Learn about arbiter layer and resource unlocking
+  </Card>
+  <Card title="Router System" icon="route" href="/concepts/router-system">
+    Understand how Router coordinates adapters
+  </Card>
+</CardGroup>

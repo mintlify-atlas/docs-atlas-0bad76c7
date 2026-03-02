@@ -1,0 +1,313 @@
+---
+title: AdapterBase
+description: Abstract base contract for settlement layer specific adapters
+---
+
+## Overview
+
+`AdapterBase` is an abstract base contract that provides foundational functionality for all settlement adapters in the Warp Router ecosystem. Adapters are always executed via delegatecall from the Router contract to handle cross-chain operations, token transfers, and settlement logic for specific protocols or chains.
+
+<Warning>
+**CRITICAL SECURITY NOTICE**: Adapters are ALWAYS executed via delegatecall from the Router contract. This means:
+- The Router's storage and balance are accessible during adapter execution
+- Any storage writes affect Router's storage, not adapter's storage
+- DO NOT implement direct calls to untrusted contracts from adapter functions
+- All external calls to untrusted contracts could be detrimental to Router security
+- Use only trusted, well-audited protocols and contracts in adapter implementations
+</Warning>
+
+## Contract Details
+
+**Source**: `src/base/adapter/AdapterBase.sol`
+
+**Inherits**: `IAdapter`, `SemVer`, `IIndexedEvents`
+
+## Delegatecall Execution Context
+
+When an adapter function is delegatecalled from the Router:
+- `address(this)` equals `_ROUTER` due to delegatecall context
+- The adapter executes in Router's context with access to Router's storage and balance
+- This is enforced by the `onlyViaRouter` modifier which checks `address(this) == _ROUTER`
+
+## State Variables
+
+### _ROUTER
+
+```solidity
+address public immutable _ROUTER
+```
+
+The Router contract address that this adapter is designed to work with. Used for security checks to ensure adapter functions are only called via delegatecall from the Router.
+
+### ARBITER
+
+```solidity
+address public immutable ARBITER
+```
+
+The Arbiter contract address responsible for validating settlements. If no arbiter is provided during construction, defaults to `address(this)` for self-arbitration.
+
+## Errors
+
+### OnlyDelegateCall
+
+```solidity
+error OnlyDelegateCall()
+```
+
+Thrown when adapter functions are called directly instead of via Router delegatecall.
+
+### InvalidRelayerContext
+
+```solidity
+error InvalidRelayerContext()
+```
+
+Thrown when relayer context data is malformed or invalid.
+
+## Constructor
+
+```solidity
+constructor(address router, address arbiter)
+```
+
+Initializes the adapter with router and arbiter addresses.
+
+<ParamField path="router" type="address">
+  The Router contract address that will delegatecall into this adapter
+</ParamField>
+
+<ParamField path="arbiter" type="address">
+  The Arbiter contract address for settlement validation, or address(0) for self-arbitration
+</ParamField>
+
+## Modifiers
+
+### onlyViaRouter
+
+```solidity
+modifier onlyViaRouter()
+```
+
+Ensures function is only called via delegatecall from the Router contract. This is a critical security modifier that prevents direct calls to adapter functions.
+
+When adapter functions are delegatecalled from Router, they execute in Router's context with access to Router's storage, balance, and permissions. This modifier prevents malicious actors from calling adapter functions directly which could bypass Router's security checks.
+
+## Functions
+
+### _loadRelayerContext
+
+```solidity
+function _loadRelayerContext() 
+    internal 
+    pure 
+    returns (
+        uint256 contextLength, 
+        bytes calldata relayerContext
+    )
+```
+
+Extracts relayer-provided context data from the end of the calldata.
+
+The Router's `_callAdapterWithRelayerContext` function appends relayer context to adapter calls using:
+```solidity
+abi.encodePacked(adapterCalldata, relayerContext, uint256(relayerContext.length))
+```
+
+Resulting calldata format:
+```
+[original_function_calldata][relayer_context_bytes][context_length_32_bytes]
+```
+
+This function efficiently extracts the relayer context without copying data by:
+1. Reading the context length from the last 32 bytes of calldata
+2. Calculating the offset where relayer context begins
+3. Returning a calldata slice pointing to the relayer context
+
+**Returns**:
+
+<ResponseField name="contextLength" type="uint256">
+  The length of the relayer context in bytes
+</ResponseField>
+
+<ResponseField name="relayerContext" type="bytes calldata">
+  The relayer context as a calldata slice ready for abi.decode by the adapter
+</ResponseField>
+
+**Example Usage**:
+
+```solidity
+(uint contextLength, bytes calldata relayerCtx) = _loadRelayerContext();
+MySettlementData memory data = abi.decode(relayerCtx, (MySettlementData));
+```
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 selector) 
+    public 
+    pure 
+    virtual 
+    returns (bool)
+```
+
+Implements ERC-165 interface detection. Base implementation supports:
+- `this.supportsInterface.selector`
+- `type(IAdapter).interfaceId`
+
+<ParamField path="selector" type="bytes4">
+  The function selector to check for support
+</ParamField>
+
+**Returns**: `bool` - True if the selector is supported
+
+### settlementLayerSpender
+
+```solidity
+function settlementLayerSpender() 
+    external 
+    view 
+    virtual 
+    returns (address tokenSpender)
+```
+
+Returns the address authorized to spend tokens for settlement. Adapters must override this function to specify the correct spender address.
+
+**Returns**: `address` - The address authorized to spend tokens
+
+### ADAPTER_TAG
+
+```solidity
+function ADAPTER_TAG() 
+    external 
+    pure 
+    virtual 
+    returns (bytes12 adapterTag)
+```
+
+Returns the adapter tag identifier. Default implementation returns `Constants.DEFAULT_ADAPTER_TAG`.
+
+**Returns**: `bytes12` - The adapter tag
+
+## Implementation Guide
+
+When creating a new adapter that inherits from AdapterBase, follow these critical guidelines:
+
+### 1. Function Signature Requirements
+
+All fill/claim functions MUST return bytes4 (their own selector):
+
+```solidity
+function myFill(...) external returns(bytes4) {
+    // ... implementation ...
+    return this.myFill.selector;
+}
+```
+
+### 2. Security Requirements
+
+- NEVER make direct calls to untrusted external contracts
+- Remember: adapters run in Router's context via delegatecall
+- Any storage writes affect Router's storage, not adapter's storage
+- Use only trusted, audited protocols (e.g., Uniswap, AAVE, Compound)
+
+### 3. IERC165 Implementation
+
+Override `supportsInterface` to include all your fill/claim function selectors:
+
+```solidity
+function supportsInterface(bytes4 interfaceId) 
+    public 
+    pure 
+    override 
+    returns (bool) 
+{
+    return interfaceId == this.myFill.selector ||
+           interfaceId == this.myClaim.selector ||
+           super.supportsInterface(interfaceId);
+}
+```
+
+### 4. Relayer Context Usage
+
+Use `_loadRelayerContext()` to retrieve relayer-provided data:
+
+```solidity
+(uint contextLength, bytes calldata relayerCtx) = _loadRelayerContext();
+MyRelayerData memory data = abi.decode(relayerCtx, (MyRelayerData));
+```
+
+### 5. Token Handling
+
+For adapters that need to handle token prefunding, use `AdapterBasePrefund` which provides:
+- `_prefundRecipient(from, to, tokenOut, amountOut)` for single token transfers
+- `_prefundRecipient(from, to, tokenOut[])` for multiple token transfers
+- Automatic handling of both ERC20 and native ETH (Constants.NATIVE_TOKEN)
+
+## Related Contracts
+
+- [AdapterBasePrefund](/api/adapters/adapter-base#adapterbaseprefund) - Extension with token prefunding helpers
+- [SameChainAdapter](/api/adapters/same-chain-adapter) - Same-chain settlement implementation
+- [MultiCallAdapter](/api/adapters/multicall-adapter) - Multi-call batching implementation
+- [IntentExecutorAdapter](/api/adapters/intent-executor-adapter) - Intent execution forwarding
+
+## AdapterBasePrefund
+
+`AdapterBasePrefund` is an abstract contract that extends `AdapterBase` with token prefunding functionality.
+
+**Source**: `src/base/adapter/AdapterBasePrefund.sol`
+
+### Functions
+
+#### _prefundRecipient (Array)
+
+```solidity
+function _prefundRecipient(
+    address from, 
+    address to, 
+    uint256[2][] calldata tokenOut
+) internal
+```
+
+Prefunds a recipient with multiple token outputs before settlement execution.
+
+<ParamField path="from" type="address">
+  The address providing the tokens (usually the Router or a solver)
+</ParamField>
+
+<ParamField path="to" type="address">
+  The recipient address that will receive the prefunded tokens
+</ParamField>
+
+<ParamField path="tokenOut" type="uint256[2][]">
+  Array of [tokenAddress, amount] pairs encoded as uint256[2]
+</ParamField>
+
+#### _prefundRecipient (Single)
+
+```solidity
+function _prefundRecipient(
+    address from,
+    address to,
+    address tokenOut,
+    uint256 amountOut
+) internal
+```
+
+Prefunds a recipient with a specific token and amount. Handles both native ETH and ERC20 token transfers.
+
+<ParamField path="from" type="address">
+  The address providing the tokens
+</ParamField>
+
+<ParamField path="to" type="address">
+  The recipient address
+</ParamField>
+
+<ParamField path="tokenOut" type="address">
+  The token address (Constants.NATIVE_TOKEN for ETH)
+</ParamField>
+
+<ParamField path="amountOut" type="uint256">
+  The amount to transfer
+</ParamField>

@@ -1,0 +1,355 @@
+---
+title: "Permit2IntentExecutor"
+description: "Executor contract for intents using Permit2 for gasless token approvals"
+---
+
+## Overview
+
+The `Permit2IntentExecutor` enables intent execution leveraging Uniswap's Permit2 system for efficient token permission management with gasless approvals.
+
+**Source:** `/src/executor/Permit2Intent/Permit2Executor.sol:43`
+
+### Key Features
+
+- **Gasless Token Approvals**: Use EIP-712 structured signatures instead of on-chain approval transactions
+- **Nonce-Based Replay Protection**: Efficient storage patterns for per-account nonce tracking
+- **EIP-1271 Validation**: Support for both EOA and smart contract account signatures
+- **Cross-Chain Support**: Origin and destination chain execution with Permit2 authorization
+
+### Execution Flow
+
+1. User signs a Permit2-compatible intent with token permissions and operations
+2. Arbiter calls `executePreClaimOpsWithPermit2Stub` to execute pre-claim operations
+3. Contract validates the signature against Permit2's domain separator
+4. Nonce is consumed to prevent replay attacks
+5. Pre-claim operations are executed (e.g., token transfers, swaps)
+6. For cross-chain: `executeTargetOpsWithPermit2Stub` executes on destination
+
+## Structs
+
+### EIP712Permit2Stub
+
+Core Permit2 parameters for intent execution.
+
+```solidity
+struct EIP712Permit2Stub {
+    uint256 nonce;
+    uint256 expires;
+}
+```
+
+<ParamField path="nonce" type="uint256">
+  Nonce for replay protection, unique per account
+</ParamField>
+
+<ParamField path="expires" type="uint256">
+  Expiration timestamp for the permit
+</ParamField>
+
+### EIP712Permit2MandateStub
+
+Mandate-specific parameters for Permit2 intent execution on origin chain.
+
+```solidity
+struct EIP712Permit2MandateStub {
+    bytes32 tokenInHash;
+    uint128 minGas;
+    bytes32 targetAttributesHash;
+    bytes32 destOpsHash;
+    bytes32 qHash;
+}
+```
+
+<ParamField path="tokenInHash" type="bytes32">
+  Hash of input token details
+</ParamField>
+
+<ParamField path="minGas" type="uint128">
+  Minimum gas required for execution of operations
+</ParamField>
+
+<ParamField path="targetAttributesHash" type="bytes32">
+  Hash of target attributes (account, tokenOut, chain, expires)
+</ParamField>
+
+<ParamField path="destOpsHash" type="bytes32">
+  Hash of destination operations to execute
+</ParamField>
+
+<ParamField path="qHash" type="bytes32">
+  Hash of qualifier data specific to this mandate
+</ParamField>
+
+### EIP712Permit2MandateDestinationStub
+
+Mandate-specific parameters for Permit2 destination chain execution.
+
+```solidity
+struct EIP712Permit2MandateDestinationStub {
+    address sponsor;
+    address arbiter;
+    uint128 minGas;
+    uint256 notarizedChainId;
+    bytes32 preClaimOpsHash;
+    bytes32 tokenInHash;
+    bytes32 qHash;
+    Target targetStub;
+}
+```
+
+<ParamField path="sponsor" type="address">
+  Original sponsor address from the origin chain
+</ParamField>
+
+<ParamField path="arbiter" type="address">
+  Arbiter that facilitated the cross-chain transfer
+</ParamField>
+
+<ParamField path="minGas" type="uint128">
+  Minimum gas required for pre-claim operations
+</ParamField>
+
+<ParamField path="notarizedChainId" type="uint256">
+  Chain ID where the order was originally notarized
+</ParamField>
+
+<ParamField path="preClaimOpsHash" type="bytes32">
+  Hash of pre-claim operations from origin chain
+</ParamField>
+
+<ParamField path="tokenInHash" type="bytes32">
+  Hash of input token details
+</ParamField>
+
+<ParamField path="qHash" type="bytes32">
+  Hash of qualifier data
+</ParamField>
+
+<ParamField path="targetStub" type="Target">
+  Target parameters for fill validation
+</ParamField>
+
+### Target
+
+Target chain fill parameters for Permit2 destination execution.
+
+```solidity
+struct Target {
+    uint256 fillExpiry;
+    bytes32 tokenOutHash;
+}
+```
+
+<ParamField path="fillExpiry" type="uint256">
+  Deadline timestamp for completing the fill
+</ParamField>
+
+<ParamField path="tokenOutHash" type="bytes32">
+  Hash of expected output tokens
+</ParamField>
+
+## Functions
+
+### executePreClaimOpsWithPermit2Stub
+
+```solidity
+function executePreClaimOpsWithPermit2Stub(
+    address account,
+    EIP712Permit2Stub calldata permit2Stub,
+    EIP712Permit2MandateStub calldata mandateStub,
+    Types.Operation calldata preClaimOps,
+    bytes calldata signature
+) external returns (bytes32 permit2Hash)
+```
+
+Executes pre-claim operations using Permit2-based authorization.
+
+<ParamField path="account" type="address" required>
+  The user account that signed the intent and will execute operations
+</ParamField>
+
+<ParamField path="permit2Stub" type="EIP712Permit2Stub" required>
+  Core Permit2 parameters including nonce and expiration
+</ParamField>
+
+<ParamField path="mandateStub" type="EIP712Permit2MandateStub" required>
+  Mandate-specific parameters including token and operation hashes
+</ParamField>
+
+<ParamField path="preClaimOps" type="Types.Operation" required>
+  Array of operations to execute on the origin chain
+</ParamField>
+
+<ParamField path="signature" type="bytes" required>
+  EIP-712 signature from the account authorizing the operations
+</ParamField>
+
+**Returns:** `bytes32` - The computed Permit2 hash used for signature validation
+
+<Note>
+  The function immediately consumes the nonce to prevent replay attacks before validating the signature and executing operations.
+</Note>
+
+### executeTargetOpsWithPermit2Stub
+
+```solidity
+function executeTargetOpsWithPermit2Stub(
+    address account,
+    EIP712Permit2Stub calldata permit2Stub,
+    EIP712Permit2MandateDestinationStub calldata mandateStub,
+    Types.Operation calldata targetOps,
+    bytes calldata signature
+) external onlyRouter returns (bytes32 permit2Hash)
+```
+
+Executes target operations using Permit2-based authorization on the destination chain.
+
+<ParamField path="account" type="address" required>
+  The user account that signed the intent and will execute operations
+</ParamField>
+
+<ParamField path="permit2Stub" type="EIP712Permit2Stub" required>
+  Core Permit2 parameters including nonce and expiration
+</ParamField>
+
+<ParamField path="mandateStub" type="EIP712Permit2MandateDestinationStub" required>
+  Mandate-specific parameters including token and operation hashes for destination
+</ParamField>
+
+<ParamField path="targetOps" type="Types.Operation" required>
+  Array of operations to execute on the destination chain
+</ParamField>
+
+<ParamField path="signature" type="bytes" required>
+  EIP-712 signature from the account authorizing the operations
+</ParamField>
+
+**Returns:** `bytes32` - The computed Permit2 hash used for signature validation
+
+<Warning>
+  This function can only be called by the authorized router contract. It validates that execution is on the correct target chain and that the fill deadline hasn't expired.
+</Warning>
+
+### isPermit2IntentNonceConsumed
+
+```solidity
+function isPermit2IntentNonceConsumed(
+    uint256 nonce,
+    address account
+) external view returns (bool used)
+```
+
+Checks if a nonce has been used for a specific account.
+
+<ParamField path="nonce" type="uint256" required>
+  The nonce value to check
+</ParamField>
+
+<ParamField path="account" type="address" required>
+  The account address that owns the nonce
+</ParamField>
+
+**Returns:** `bool` - True if the nonce has been consumed, false otherwise
+
+## Signature Validation
+
+The contract uses EIP-712 signature validation with Permit2's domain separator:
+
+### Hash Computation
+
+1. **Mandate Hash**: Combines target attributes, operation hashes, and qualifier data
+2. **Permit2 Hash**: Combines mandate hash with Permit2-specific fields (token, arbiter, nonce, expires)
+3. **Typed Data Digest**: Wraps Permit2 hash with domain separator for final signature validation
+
+### Validation Modes
+
+Supports multiple signature validation modes via the `ValidateSignature` base contract:
+
+- **ERC1271**: Direct signature validation
+- **EMISSARY**: Session key validation
+- **Hybrid Modes**: Fallback combinations for flexibility
+
+See [IntentExecutor](/api/executor/intent-executor#signature-validation) for detailed validation mode documentation.
+
+## Example Usage
+
+```solidity
+// Prepare Permit2 intent on origin chain
+EIP712Permit2Stub memory permit2Stub = EIP712Permit2Stub({
+    nonce: 1,
+    expires: block.timestamp + 1 hours
+});
+
+EIP712Permit2MandateStub memory mandateStub = EIP712Permit2MandateStub({
+    tokenInHash: keccak256(abi.encode(tokenIn)),
+    minGas: 100000,
+    targetAttributesHash: keccak256(abi.encode(targetAttributes)),
+    destOpsHash: keccak256(abi.encode(destOps)),
+    qHash: keccak256(abi.encode(qualifier))
+});
+
+// Execute pre-claim operations
+bytes32 permit2Hash = intentExecutor.executePreClaimOpsWithPermit2Stub(
+    accountAddress,
+    permit2Stub,
+    mandateStub,
+    preClaimOps,
+    userSignature
+);
+
+// On destination chain (via router)
+bytes32 destHash = router.executeTargetOpsWithPermit2Stub(
+    recipientAddress,
+    permit2Stub,
+    destMandateStub,
+    targetOps,
+    userSignature
+);
+```
+
+## Gas Optimization
+
+<Tip>
+  The contract uses cached Permit2 domain separator to avoid external calls during signature validation, reducing gas costs.
+</Tip>
+
+## Error Handling
+
+<ResponseField name="InvalidSignature" type="error">
+  Thrown when signature validation fails using any configured validation mode
+</ResponseField>
+
+<ResponseField name="InvalidParams" type="error">
+  Thrown when fill expiration has passed or chain validation fails
+</ResponseField>
+
+<ResponseField name="OnlyRouter" type="error">
+  Thrown when `executeTargetOpsWithPermit2Stub` is called by non-router address
+</ResponseField>
+
+## Security Considerations
+
+<Warning>
+  **Domain Separator Validation**: The contract uses Permit2's domain separator to prevent cross-protocol signature reuse. Signatures are only valid for Permit2 intents.
+</Warning>
+
+<Warning>
+  **Nonce Consumption**: Nonces are consumed immediately at the start of execution to prevent replay attacks, even if signature validation or execution fails afterward.
+</Warning>
+
+<Warning>
+  **Expiration Checks**: Both the permit expiration and fill expiration (for destination chain) are validated to prevent execution of stale intents.
+</Warning>
+
+## Benefits over Standard Approvals
+
+1. **Gas Savings**: No separate approval transaction needed
+2. **Better UX**: Single signature for approval + operation
+3. **Granular Control**: Per-intent token permissions instead of unlimited approvals
+4. **Cross-Chain**: Works seamlessly across chains with consistent signatures
+
+## Related
+
+- [IntentExecutor](/api/executor/intent-executor) - Main executor contract
+- [CompactIntentExecutor](/api/executor/compact-intent) - Compact protocol execution
+- [StandaloneIntentExecutor](/api/executor/standalone-intent) - Self-contained execution

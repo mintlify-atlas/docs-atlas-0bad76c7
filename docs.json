@@ -1,122 +1,105 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Warp Router",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6366f1",
+    "light": "#818cf8",
+    "dark": "#4f46e5"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/rhinestonewtf/warp-router"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/rhinestonewtf/warp-router"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "architecture"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/router-system",
+              "concepts/adapters",
+              "concepts/arbiters",
+              "concepts/intent-execution",
+              "concepts/fill-and-claim"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Integration Guide",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "integration/solvers",
+              "integration/building-adapters",
+              "integration/solver-context",
+              "integration/deployment"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Advanced",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "advanced/gas-optimization",
+              "advanced/security",
+              "advanced/protocol-support"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Router",
             "pages": [
-              "api-reference/introduction"
+              "api/router/router-logic",
+              "api/router/router-manager",
+              "api/router/router-utils"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Adapters",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/adapters/adapter-base",
+              "api/adapters/same-chain-adapter",
+              "api/adapters/intent-executor-adapter",
+              "api/adapters/multicall-adapter"
+            ]
+          },
+          {
+            "group": "Arbiters",
+            "pages": [
+              "api/arbiters/arbiter-base",
+              "api/arbiters/same-chain-arbiter",
+              "api/arbiters/compact-arbiter",
+              "api/arbiters/permit2-arbiter"
+            ]
+          },
+          {
+            "group": "Intent Executor",
+            "pages": [
+              "api/executor/intent-executor",
+              "api/executor/compact-intent",
+              "api/executor/permit2-intent",
+              "api/executor/standalone-intent"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

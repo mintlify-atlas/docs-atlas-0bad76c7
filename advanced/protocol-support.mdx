@@ -1,0 +1,458 @@
+---
+title: Protocol Support
+description: Supported protocols and integrations in Warp Router
+---
+
+Warp Router integrates with multiple DeFi protocols through a flexible adapter architecture, supporting both same-chain and cross-chain settlement flows.
+
+## TheCompact Protocol
+
+TheCompact is a cross-chain intent execution protocol that enables users to lock tokens and execute operations across multiple chains.
+
+### Contract Address
+
+From Constants.sol, TheCompact is deployed at the same address across all supported chains:
+
+```solidity
+// Deployed via CREATE2 for deterministic addresses
+// Address varies by chain - check deployment documentation
+```
+
+<Note>
+  TheCompact uses deterministic deployment (CREATE2) for consistent addresses across chains. Verify the address for your specific chain in the official deployment documentation.
+</Note>
+
+### Integration Points
+
+#### CompactArbiter
+
+The Router integrates with TheCompact through the `CompactArbiter` contract:
+
+```solidity
+contract ArbiterBase is CompactArbiter, Permit2Arbiter, PreClaimExecution {
+    // From ArbiterBase.sol:33
+}
+
+contract CompactArbiter {
+    constructor(address compact) {
+        COMPACT = ITheCompact(compact);
+    }
+}
+```
+
+From ArbiterBase.sol:66-76.
+
+#### Mandate Hash Computation
+
+From ArbiterBase.sol:207-209:
+
+```solidity
+mandateHash = EIP712TypeHashLib.hashMandateRaw({
+    targetAttributes: targetAttributesHash,
+    minGas: minGas,
+    preClaimOpsHash: preClaimOpsHash,
+    destOpsHash: destOpsHash,
+    qHash: qHash
+});
+```
+
+### Compact Features
+
+<CardGroup cols={2}>
+  <Card title="Resource Locks" icon="lock">
+    Lock tokens on origin chain for cross-chain claims
+  </Card>
+  <Card title="ERC-7683 Standard" icon="file-contract">
+    Follows cross-chain intent standard
+  </Card>
+  <Card title="Pre-Claim Operations" icon="list-check">
+    Execute setup operations before claim
+  </Card>
+  <Card title="Gas Stipends" icon="gas-pump">
+    Allocate gas for complex operations
+  </Card>
+</CardGroup>
+
+### Compact Order Structure
+
+From SameChainAdapter.sol:76-81:
+
+```solidity
+struct FillDataCompact {
+    Types.Order order;
+    Types.Signatures userSigs;
+    bytes32[] otherElements;        // For multi-element orders
+    bytes allocatorData;            // Protocol-specific data
+}
+```
+
+### Pre-Claim Operations
+
+TheCompact supports pre-claim operations that execute before settlement:
+
+```solidity
+if (opsType == SmartExecutionLib.Type.ERC7579) {
+    bool success = _handlePreClaimOpsCompactERC7579({
+        account: order.sponsor,
+        order: order,
+        signature: sigs,
+        elementStub: ICompactIntentExecutor.EIP712ElementStubOrigin({
+            otherElements: otherElements,
+            minGas: minGas,
+            elementOffset: elementOffset,
+            destOpsHash: destOpsHash,
+            tokenInHash: order.tokenIn.hashTokenIn(),
+            targetAttributesHash: targetAttributesHash,
+            qHash: qHash
+        }),
+        notarizedChainId: notarizedChainId,
+        preClaimGasStipend: preClaimGasStipend,
+        sigMode: order.preClaimOps.extractSigMode()
+    });
+    require(success);
+}
+```
+
+From ArbiterBase.sol:170-187.
+
+## Permit2 Protocol
+
+Permit2 is Uniswap's signature-based token approval system, enabling gasless approvals through signed permits.
+
+### Contract Address
+
+From Constants.sol:14-15:
+
+```solidity
+/// @notice Uniswap's Permit2 contract address (same on all chains)
+ISignatureTransfer internal constant PERMIT2 = 
+    ISignatureTransfer(address(0x000000000022D473030F116dDEE9F6B43aC78BA3));
+```
+
+**Deployed at**: `0x000000000022D473030F116dDEE9F6B43aC78BA3`
+
+<Tip>
+  Permit2 is deployed at the same address on all major EVM chains (Ethereum, Arbitrum, Optimism, Base, Polygon, etc.)
+</Tip>
+
+### Integration Points
+
+#### Permit2Arbiter
+
+From ArbiterBase.sol:33:
+
+```solidity
+contract ArbiterBase is CompactArbiter, Permit2Arbiter, PreClaimExecution {
+    constructor(
+        address router,
+        address compact,
+        address addressBook
+    )
+        CompactArbiter(compact)
+        Permit2Arbiter(address(Constants.PERMIT2))
+        PreClaimExecution(addressBook)
+    {
+        ROUTER = router;
+    }
+}
+```
+
+#### Permit2 Order Structure
+
+From SameChainAdapter.sol:95-98:
+
+```solidity
+struct FillDataPermit2 {
+    Types.Order order;
+    Types.Signatures userSigs;
+}
+```
+
+Simpler than Compact - no allocator data or other elements needed.
+
+### Permit2 Features
+
+<CardGroup cols={2}>
+  <Card title="Gasless Approvals" icon="signature">
+    Users sign permits off-chain instead of on-chain approvals
+  </Card>
+  <Card title="Batch Transfers" icon="layer-group">
+    Transfer multiple tokens in a single transaction
+  </Card>
+  <Card title="Nonce Management" icon="hashtag">
+    Built-in replay protection via nonces
+  </Card>
+  <Card title="Expiration" icon="clock">
+    Time-limited permits for security
+  </Card>
+</CardGroup>
+
+### Permit2 Mandate Hash
+
+From ArbiterBase.sol:275-277:
+
+```solidity
+mandateHash = EIP712TypeHashLib.hashMandateRaw({
+    targetAttributes: targetAttributesHash,
+    minGas: minGas,
+    preClaimOpsHash: preClaimOpsHash,
+    destOpsHash: destOpsHash,
+    qHash: qHash
+});
+```
+
+Same structure as Compact but different validation flow.
+
+### EIP-712 Integration
+
+Permit2 uses EIP-712 structured data signing:
+
+```solidity
+bytes32 internal constant TYPEHASH_JIT_PERMIT2 = 
+    0x1b355fbc76f14a5aefe5c85df793a0f876f90d66f457273501c13ac311b5f3f8;
+
+bytes32 internal constant PERMIT2_TOKEN_HASH = 
+    0x618358ac3db8dc274f0cd8829da7e234bd48cd73c4a740aede1adec9846d06a1;
+```
+
+From EIP712TypeHashLib.sol:280-287.
+
+## Cross-Chain Support
+
+Warp Router supports cross-chain settlements through specialized adapters and arbiters.
+
+### Same-Chain Settlements
+
+For operations where origin and destination are the same chain:
+
+```solidity
+contract SameChainAdapter is AdapterBasePrefund, SameChainArbiter {
+    function samechain_compact_handleFill(FillDataCompact calldata fillData) 
+        external 
+        payable 
+        onlyViaRouter 
+        returns (bytes4) 
+    {
+        _handleCompactFill(fillData, _tokenInRecipient());
+        return this.samechain_compact_handleFill.selector;
+    }
+}
+```
+
+From SameChainAdapter.sol:172-177.
+
+**Flow**:
+1. Pre-fund recipient with output tokens
+2. Claim input tokens via arbiter
+3. Execute target operations
+4. Emit fill event
+
+### Cross-Chain Settlements
+
+For operations across different chains:
+
+<Steps>
+  <Step title="Origin Chain">
+    User locks tokens using TheCompact on origin chain
+  </Step>
+  
+  <Step title="Notarization">
+    Order is notarized and propagated to destination chain
+  </Step>
+  
+  <Step title="Destination Claim">
+    Solver claims on destination chain via Router
+  </Step>
+  
+  <Step title="Settlement">
+    Arbiter validates and executes operations
+  </Step>
+</Steps>
+
+### Multi-Element Orders
+
+TheCompact supports multi-element orders for complex cross-chain flows:
+
+```solidity
+struct MultichainCompact {
+    address sponsor;
+    uint256 nonce;
+    uint256 expires;
+    Element[] elements;  // Multiple chain operations
+}
+```
+
+From EIP712TypeHashLib.sol:231-232.
+
+## Direct Routes
+
+Direct routes allow operations without adapter overhead.
+
+### Single Call
+
+From DirectRoutes.sol:121-127:
+
+```solidity
+if (selector == ISingleCaller.singleCall.selector) {
+    (bool success,) = address(CALLER).call(adapterCalldata[4:]);
+    require(success, CallFailed());
+    return true;
+}
+```
+
+**Use case**: Simple external calls without adapter logic
+
+### Multi Call
+
+From DirectRoutes.sol:128-134:
+
+```solidity
+else if (selector == MultiCaller.multiCall.selector) {
+    (bool success,) = address(CALLER).call(adapterCalldata);
+    require(success, CallFailed());
+    return true;
+}
+```
+
+**Use case**: Batch multiple calls in single transaction
+
+### Fee Collection
+
+In-router fee collection without delegatecall:
+
+```solidity
+else if (selector == IDirectRoute.onFill_inRouter_collectFee.selector) {
+    _onFill_inRouter_collectFee(adapterCalldata[4:]);
+    return true;
+}
+```
+
+From DirectRoutes.sol:160-165.
+
+## Adapter Registry
+
+Adapters are registered using the Router's adapter management system.
+
+### Installing Adapters
+
+```solidity
+function installFillAdapter(
+    Version.ProtocolVersion version,
+    bytes4 selector,
+    address adapter
+) external;
+
+function installClaimAdapter(
+    Version.ProtocolVersion version,
+    bytes4 selector,
+    address adapter
+) external;
+```
+
+Requires `ADAPTER_ADDER_ROLE` from RouterManager.
+
+### Adapter Lookup
+
+From RouterLogic.sol:254:
+
+```solidity
+(adapter, adapterTag) = selector.withFillAdapter().adapterAddressAndTag();
+```
+
+Lookup by selector returns both address and configuration tag.
+
+### Adapter Tags
+
+Adapters can declare special behaviors via tags:
+
+```solidity
+function ADAPTER_TAG() external pure override returns (bytes12) {
+    return Constants.DEFAULT_ADAPTER_TAG.setSkipRelayerContext();
+}
+```
+
+From IntentExecutorAdapter.sol:227-229.
+
+**Available flags**:
+- `setSkipRelayerContext()`: Adapter doesn't consume relayer context
+- Default tag: Standard adapter behavior
+
+## Protocol Compatibility Matrix
+
+| Protocol | Same-Chain | Cross-Chain | Pre-Claim Ops | Gas Stipends |
+|----------|-----------|-------------|---------------|---------------|
+| TheCompact | ✅ | ✅ | ✅ | ✅ |
+| Permit2 | ✅ | ✅ | ✅ | ❌ |
+| Direct Routes | ✅ | ❌ | ❌ | ❌ |
+
+## Integration Examples
+
+### TheCompact Integration
+
+```solidity
+// 1. Deploy arbiter with Compact address
+ArbiterBase arbiter = new ArbiterBase(
+    routerAddress,
+    compactAddress,  // TheCompact deployment
+    addressBookAddress
+);
+
+// 2. Deploy adapter
+SameChainAdapter adapter = new SameChainAdapter(
+    routerAddress,
+    compactAddress,
+    arbiterAddress,
+    addressBookAddress
+);
+
+// 3. Register adapter
+router.installFillAdapter(
+    Version.PROTOCOL_V1,
+    adapter.samechain_compact_handleFill.selector,
+    address(adapter)
+);
+```
+
+### Permit2 Integration
+
+```solidity
+// Permit2 address is constant
+address permit2 = address(Constants.PERMIT2);
+
+// Register Permit2 adapter
+router.installFillAdapter(
+    Version.PROTOCOL_V1,
+    adapter.samechain_permit2_handleFill.selector,
+    address(adapter)
+);
+```
+
+## Version Management
+
+From Version.sol:
+
+```solidity
+enum ProtocolVersion {
+    V0,  // Legacy
+    V1   // Current
+}
+
+uint8 internal constant SAMECHAIN_VERSION_MINOR = 0;
+uint8 internal constant SAMECHAIN_VERSION_PATCH = 0;
+```
+
+Adapters declare versions via SemVer:
+
+```solidity
+contract SameChainAdapter is AdapterBasePrefund, SameChainArbiter {
+    constructor(...) 
+        SemVer(Version.SAMECHAIN_VERSION_MINOR, Version.SAMECHAIN_VERSION_PATCH)
+    { }
+}
+```
+
+From SameChainAdapter.sol:144.
+
+<Warning>
+  Always verify protocol contract addresses on-chain before integration. While Permit2 uses a consistent address, TheCompact and other protocols may vary by chain.
+</Warning>

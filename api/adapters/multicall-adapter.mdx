@@ -1,0 +1,417 @@
+---
+title: MultiCallAdapter
+description: Adapter for executing batched arbitrary calls with solver compensation
+---
+
+## Overview
+
+`MultiCallAdapter` enables solvers to execute multiple calls on behalf of users while ensuring proper token transfers and fee collection. It supports various fill operations including standard fills, fills with fees, and fills with both fees and refunds.
+
+**Source**: `src/arbiters/multicall/MultiCallAdapter.sol`
+
+**Inherits**: `AdapterBasePrefund`, `Caller`
+
+## Features
+
+- Batched arbitrary call execution
+- Solver compensation validation
+- Token prefunding for users
+- Support for native ETH and ERC20 tokens
+- Just-In-Time (JIT) claim operations
+- Payable multicalls with ETH value forwarding
+
+## Data Structures
+
+### FillData
+
+```solidity
+struct FillData {
+    uint256[2][] tokenIn;
+    uint256[2][] tokenOut;
+    Execution[] multicalls;
+    address account;
+    uint256 value;
+}
+```
+
+Data structure for multicall fill operations.
+
+<ParamField path="tokenIn" type="uint256[2][]">
+  Array of [token_address, amount] pairs representing solver payment. What the solver is being paid back in after executing the multicalls.
+</ParamField>
+
+<ParamField path="tokenOut" type="uint256[2][]">
+  Array of [token_address, amount] pairs the solver transfers to user. What the solver pays the account before execution.
+</ParamField>
+
+<ParamField path="multicalls" type="Execution[]">
+  Batch of execution calls to perform. Each execution contains target, value, and calldata.
+</ParamField>
+
+<ParamField path="account" type="address">
+  Target smart contract account for the operations.
+</ParamField>
+
+<ParamField path="value" type="uint256">
+  ETH value to send with the multicall execution.
+</ParamField>
+
+### JITClaimData
+
+```solidity
+struct JITClaimData {
+    uint256[2][] tokenIn;
+    Execution[] multicalls;
+}
+```
+
+Data structure for Just-In-Time claim operations.
+
+<ParamField path="tokenIn" type="uint256[2][]">
+  Array of [token_address, amount] pairs for solver compensation.
+</ParamField>
+
+<ParamField path="multicalls" type="Execution[]">
+  Batch of execution calls for the JIT claim.
+</ParamField>
+
+## Errors
+
+### TokenNotPaidInMulticall
+
+```solidity
+error TokenNotPaidInMulticall()
+```
+
+Thrown if the solver does not receive the expected amount of input tokens after the multicall execution.
+
+### InvalidRelayerContext
+
+```solidity
+error InvalidRelayerContext()
+```
+
+Thrown when relayer context data is malformed or has incorrect length.
+
+## Constructor
+
+```solidity
+constructor(address router)
+```
+
+Initializes the MultiCallAdapter with router address.
+
+<ParamField path="router" type="address">
+  Address of the Warp Router contract that will delegatecall this adapter
+</ParamField>
+
+<Info>
+The arbiter is set to `address(0)` since multicall operations use a different validation pattern than traditional arbiters.
+</Info>
+
+## Fill Functions
+
+### multicall_handleFill
+
+```solidity
+function multicall_handleFill(
+    FillData calldata fillData
+) 
+    external 
+    payable 
+    onlyViaRouter 
+    returns (bytes4)
+```
+
+Executes a standard multicall fill operation. This is the main entry point for multicall-based settlements.
+
+<ParamField path="fillData" type="FillData">
+  Contains token transfers and multicall executions to perform
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector for verification (`this.multicall_handleFill.selector`)
+</ResponseField>
+
+**Execution Flow**:
+1. Extracts tokenIn recipient from relayer context
+2. Pre-funds user account with tokenOut
+3. Executes multicalls through arbiter
+4. Validates solver received expected tokenIn amounts
+5. Returns function selector
+
+**Function Selector**: `this.multicall_handleFill.selector`
+
+### multicall_handleJITClaim
+
+```solidity
+function multicall_handleJITClaim(
+    JITClaimData calldata jitClaimData
+) 
+    external 
+    onlyViaRouter 
+    returns (bytes4)
+```
+
+Handles Just-In-Time claim operations with multicall execution. Executes multicalls and ensures solver receives specified tokenIn amounts.
+
+<ParamField path="jitClaimData" type="JITClaimData">
+  Contains tokenIn compensation and multicall executions
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector for verification (`this.multicall_handleJITClaim.selector`)
+</ResponseField>
+
+**Execution Flow**:
+1. Extracts tokenIn recipient from relayer context
+2. Executes multicalls through arbiter
+3. Validates solver received expected tokenIn amounts
+4. Returns function selector
+
+**Function Selector**: `this.multicall_handleJITClaim.selector`
+
+### multicall_handlePayable
+
+```solidity
+function multicall_handlePayable(
+    uint256 value,
+    Execution[] calldata executions
+) 
+    external 
+    payable 
+    onlyViaRouter 
+    returns (bytes4)
+```
+
+Handles payable multicall operations with ETH value forwarding.
+
+<ParamField path="value" type="uint256">
+  Amount of ETH to send with the multicall
+</ParamField>
+
+<ParamField path="executions" type="Execution[]">
+  Array of calls to execute
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector for verification (`this.multicall_handlePayable.selector`)
+</ResponseField>
+
+**Execution Flow**:
+1. Forwards ETH value and executions to arbiter's `multiCall` function
+2. Returns function selector
+
+**Function Selector**: `this.multicall_handlePayable.selector`
+
+## Internal Functions
+
+### _tokenInRecipient
+
+```solidity
+function _tokenInRecipient() internal pure returns (address)
+```
+
+Extracts the tokenIn recipient address from relayer context.
+
+**Relayer Context Format**: `abi.encodePacked(address(tokenInRecipient))` (20 bytes)
+
+**Returns**:
+
+<ResponseField name="tokenInRecipient" type="address">
+  The address designated to receive input tokens from the multicall
+</ResponseField>
+
+### _handleMulticall
+
+```solidity
+function _handleMulticall(
+    FillData calldata fillData,
+    address tokenInReceiver
+) internal
+```
+
+Internal handler for multicall fill operations. Prefunds user account with tokenOut before executing multicalls.
+
+<ParamField path="fillData" type="FillData">
+  Contains all data for the fill operation
+</ParamField>
+
+<ParamField path="tokenInReceiver" type="address">
+  Address to receive tokenIn payments
+</ParamField>
+
+**Execution Steps**:
+1. Prefunds user account: `_prefundRecipient(msg.sender, fillData.account, fillData.tokenOut)`
+2. Executes multicalls and validates tokenIn: `_multicallAssertTokenIn(...)`
+
+### _multicallAssertTokenIn
+
+```solidity
+function _multicallAssertTokenIn(
+    Execution[] calldata multicalls,
+    uint256[2][] calldata tokenIn,
+    address tokenInReceiver,
+    uint256 value
+) internal
+```
+
+Core multicall execution with token validation. Executes multicalls through arbiter and ensures tokenIn is properly transferred to solver.
+
+<ParamField path="multicalls" type="Execution[]">
+  Array of calls to execute
+</ParamField>
+
+<ParamField path="tokenIn" type="uint256[2][]">
+  Expected token payments to solver
+</ParamField>
+
+<ParamField path="tokenInReceiver" type="address">
+  Address to receive the tokens
+</ParamField>
+
+<ParamField path="value" type="uint256">
+  ETH value to send with the multicall
+</ParamField>
+
+**Implementation**:
+```solidity
+MultiCaller(payable(ARBITER)).multiCallWithDrainToken{
+    value: value
+}(multicalls, tokenIn, tokenInReceiver);
+```
+
+## Helper Functions
+
+### __encodeRelayerData
+
+```solidity
+function __encodeRelayerData(
+    address tokenInRecipient
+) external pure returns (bytes memory)
+```
+
+Helper function for off-chain components to construct relayerContext data.
+
+<ParamField path="tokenInRecipient" type="address">
+  Address to receive input tokens from the multicall
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="relayerData" type="bytes">
+  Packed bytes containing the recipient address: `abi.encodePacked(tokenInRecipient)`
+</ResponseField>
+
+## Interface Support
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 selector) 
+    public 
+    pure 
+    override(AdapterBase, Caller) 
+    returns (bool)
+```
+
+Checks if adapter supports a given function selector.
+
+<ParamField path="selector" type="bytes4">
+  Function selector to check
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="supported" type="bool">
+  True if the selector is supported. Supports:
+  - `this.multicall_handleFill.selector`
+  - `this.multicall_handleJITClaim.selector`
+  - `this.multicall_handlePayable.selector`
+  - Any selectors from AdapterBase
+  - Any selectors from Caller
+  - `type(IAdapter).interfaceId`
+</ResponseField>
+
+## Relayer Context
+
+The relayer context must be exactly 20 bytes containing the tokenIn recipient address:
+
+```solidity
+abi.encodePacked(address(tokenInRecipient))
+```
+
+This address receives the solver's compensation tokens after multicall execution.
+
+## Token Format
+
+Tokens are represented as `uint256[2]` arrays:
+
+```solidity
+[tokenAddress, amount]
+```
+
+Where:
+- `tokenAddress` is encoded as uint256 (use `IdLib.toAddress()` to convert)
+- `amount` is the token amount in wei
+
+<Info>
+For native ETH, use `Constants.NATIVE_TOKEN` as the token address.
+</Info>
+
+## Execution Flow Example
+
+```solidity
+// 1. Solver constructs fill data
+FillData memory fillData = FillData({
+    tokenIn: [[uint256(uint160(USDC)), 1000e6]], // Solver receives 1000 USDC
+    tokenOut: [[uint256(uint160(WETH)), 1e18]], // User receives 1 WETH
+    multicalls: executionArray, // Calls to execute
+    account: userSmartAccount,
+    value: 0
+});
+
+// 2. Router calls adapter
+router.multicall_handleFill(fillData);
+
+// 3. Adapter execution:
+//    a. Pre-funds user with 1 WETH
+//    b. Executes multicalls on user's behalf
+//    c. Validates solver received 1000 USDC
+//    d. Returns selector
+```
+
+## Security Considerations
+
+<Warning>
+- Only callable via Router delegatecall (enforced by `onlyViaRouter`)
+- Executes in Router's context with access to Router's storage and balance
+- Validates solver compensation after multicall execution
+- Pre-funding ensures user receives tokens before multicall execution
+- Atomic execution: if any step fails, entire transaction reverts
+</Warning>
+
+### Token Validation
+
+The adapter validates that the solver receives expected tokenIn amounts by calling `multiCallWithDrainToken` on the arbiter, which:
+1. Executes the multicalls
+2. Transfers tokenIn amounts to solver
+3. Reverts if expected tokens are not available
+
+## Gas Optimization
+
+- Uses `uint256[2][]` for efficient token encoding
+- Minimal data copying with calldata parameters
+- Direct arbiter calls without intermediate proxying
+- Optimized prefunding with `AdapterBasePrefund` helpers
+
+## Related Contracts
+
+- [AdapterBase](/api/adapters/adapter-base) - Base adapter functionality
+- [AdapterBasePrefund](/api/adapters/adapter-base#adapterbaseprefund) - Token prefunding helpers

@@ -1,0 +1,512 @@
+---
+title: Intent Execution
+description: Understanding the Intent Executor and ERC-7579 integration
+---
+
+## Overview
+
+The Intent Executor is a modular smart contract that executes user intents across multiple protocols and chains. It implements ERC-7579 for smart account compatibility and supports Compact, Permit2, and standalone execution patterns.
+
+<Note>
+The Intent Executor acts as the final execution layer for target operations after settlement validation and resource unlocking are complete.
+</Note>
+
+## Architecture
+
+### IntentExecutor
+
+The main executor contract unifies multiple execution mechanisms:
+
+```solidity IntentExecutor.sol
+contract IntentExecutor is
+    ERC7579ExecutorBase,
+    IntentExecutorBase,
+    ValidateSignature,
+    CompactIntentExecutor,
+    Permit2IntentExecutor,
+    StandaloneIntentExecutor,
+    TrustedExecution
+{
+    constructor(
+        address router,
+        address compact,
+        address allocator,
+        address addressBook,
+        address smartSessionEmissary
+    )
+        TrustedExecution(addressBook)
+        ValidateSignature(compact, smartSessionEmissary)
+        CompactEIP712(compact)
+        Permit2EIP712(address(Constants.PERMIT2))
+        IntentExecutorBase(router, allocator)
+        StandaloneIntentExecutor(addressBook)
+    { }
+}
+```
+
+**Execution Types:**
+
+<CardGroup cols={2}>
+  <Card title="Compact Intents" icon="layer-group">
+    Cross-chain intents using The Compact protocol
+  </Card>
+  <Card title="Permit2 Intents" icon="signature">
+    Gasless token approvals via Permit2
+  </Card>
+  <Card title="Standalone Intents" icon="bolt">
+    Independent execution without external protocols
+  </Card>
+  <Card title="Trusted Execution" icon="shield-check">
+    Whitelisted execution without signature validation
+  </Card>
+</CardGroup>
+
+## ERC-7579 Integration
+
+The executor implements the ERC-7579 module standard for smart account compatibility:
+
+```solidity IntentExecutor.sol
+function isModuleType(uint256 moduleTypeId) external pure returns (bool) {
+    return moduleTypeId == MODULE_TYPE_EXECUTOR;
+}
+
+function isInitialized(address smartAccount) external view returns (bool) {
+    return (smartAccount.moduleSlot().get() == 1);
+}
+
+function onInstall(bytes calldata /* data */) external {
+    address account = msg.sender;
+    account.moduleSlot().set(1);
+}
+
+function onUninstall(bytes calldata /* data */) external {
+    address account = msg.sender;
+    account.moduleSlot().set(0);
+}
+```
+
+<Info>
+**ERC-7579 Benefits:**
+- Smart account compatibility
+- Modular execution patterns
+- Standard installation/uninstallation
+- Account-specific initialization tracking
+</Info>
+
+### Module Lifecycle
+
+<Steps>
+  <Step title="Install Module">
+    Smart account calls `onInstall()` to enable executor
+    ```solidity
+    intentExecutor.onInstall("");
+    ```
+  </Step>
+  <Step title="Execute Intents">
+    Account can now execute intents through the module
+    ```solidity
+    intentExecutor.executeTargetOpsWithCompactStub(...);
+    ```
+  </Step>
+  <Step title="Uninstall Module">
+    Account calls `onUninstall()` to disable executor
+    ```solidity
+    intentExecutor.onUninstall("");
+    ```
+  </Step>
+</Steps>
+
+## Execution Patterns
+
+### Compact Intent Execution
+
+Executes intents using The Compact protocol:
+
+```solidity CompactIntentExecutor.sol
+function executeTargetOpsWithCompactStub(
+    address sponsor,
+    Types.Operation calldata targetOps,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements,
+    uint256 preClaimGasStipend
+) external payable nonReentrant {
+    // Validate signatures and execute pre-claim operations
+    _compactPreClaimOps(
+        sponsor,
+        targetOps,
+        sigs,
+        otherElements,
+        preClaimGasStipend
+    );
+    
+    // Execute target operations
+    _executeTargetOps(sponsor, targetOps);
+}
+```
+
+**Flow:**
+
+<Tabs>
+  <Tab title="Signature Validation">
+    ```solidity
+    // Validate sponsor's signature on target operations
+    bytes32 mandateHash = _validateCompactSignature(
+        sponsor,
+        targetOps,
+        sigs,
+        otherElements
+    );
+    ```
+  </Tab>
+  <Tab title="Pre-Claim Ops">
+    ```solidity
+    // Execute pre-claim operations with gas stipend
+    if (preClaimOps.data.length > 0) {
+        executeWithGasStipend(
+            preClaimOps,
+            preClaimGasStipend
+        );
+    }
+    ```
+  </Tab>
+  <Tab title="Target Ops">
+    ```solidity
+    // Execute user's target operations
+    _executeTargetOps(sponsor, targetOps);
+    ```
+  </Tab>
+</Tabs>
+
+### Permit2 Intent Execution
+
+Executes intents with Permit2 token approvals:
+
+```solidity Permit2IntentExecutor.sol
+function executeTargetOpsWithPermit2Stub(
+    address sponsor,
+    Types.Operation calldata targetOps,
+    Types.Signatures calldata sigs
+) external payable nonReentrant {
+    // Validate Permit2 signature
+    _permit2PreClaimOps(sponsor, targetOps, sigs);
+    
+    // Execute target operations
+    _executeTargetOps(sponsor, targetOps);
+}
+```
+
+<Info>
+Permit2 execution is more gas-efficient than Compact as it doesn't require pre-claim operations or gas stipends.
+</Info>
+
+### Standalone Intent Execution
+
+Executes intents independently without external protocols:
+
+```solidity StandaloneIntentExecutor.sol
+function executeMultichainOps(
+    address sponsor,
+    Types.Operation calldata ops,
+    bytes calldata signature
+) external payable nonReentrant {
+    // Validate signature
+    _validateStandaloneSignature(sponsor, ops, signature);
+    
+    // Execute operations
+    _executeTargetOps(sponsor, ops);
+}
+
+function executeSinglechainOps(
+    address sponsor,
+    Types.Operation calldata ops,
+    bytes calldata signature
+) external payable nonReentrant {
+    // Validate chain-specific signature
+    _validateSinglechainSignature(sponsor, ops, signature);
+    
+    // Execute operations
+    _executeTargetOps(sponsor, ops);
+}
+```
+
+### Trusted Execution
+
+Executes operations from whitelisted contracts without signature validation:
+
+```solidity TrustedExecution.sol
+function executeOpsWithoutSignature(
+    address account,
+    Types.Operation calldata ops
+) external {
+    // Verify caller is trusted
+    require(isTrustedContract(msg.sender), NotTrusted());
+    
+    // Execute without signature validation
+    _executeTargetOps(account, ops);
+}
+```
+
+<Warning>
+**Trusted Execution Security:**
+
+Only whitelisted contracts can call `executeOpsWithoutSignature`. This pattern is used by arbiters that have already validated signatures in the pre-claim phase, avoiding redundant validation and saving gas.
+
+Trusted contracts:
+- SameChainArbiter
+- CrossChainArbiter
+- Other verified settlement contracts
+</Warning>
+
+## Operation Structure
+
+Target operations are encoded using the `Types.Operation` structure:
+
+```solidity OrderTypes.sol
+struct Operation {
+    bytes data;  // Encoded operation data
+}
+
+// Example operation data format:
+// [signature_mode][operations]
+// |<-- 1 byte -->|<- variable ->|
+```
+
+### Signature Modes
+
+<Tabs>
+  <Tab title="Standard Mode">
+    ```solidity
+    // Standard EIP-712 signature validation
+    SigMode.STANDARD = 0x00
+    
+    // Validates full signature against operation hash
+    bytes32 hash = keccak256(abi.encode(operation));
+    require(signer == ECDSA.recover(hash, signature));
+    ```
+  </Tab>
+  <Tab title="Session Key Mode">
+    ```solidity
+    // Session key delegation
+    SigMode.SESSION_KEY = 0x01
+    
+    // Validates against session key permissions
+    require(isValidSessionKey(sessionKey, permissions));
+    ```
+  </Tab>
+  <Tab title="Emissary Mode">
+    ```solidity
+    // Delegated execution to another contract
+    SigMode.EXECUTION_EMISSARY = 0x02
+    
+    // Forwards execution to designated emissary
+    emissary.execute(operation);
+    ```
+  </Tab>
+</Tabs>
+
+## Target Operation Execution
+
+The core execution logic handles various operation types:
+
+```solidity
+function _executeTargetOps(
+    address account,
+    Types.Operation calldata ops
+) internal {
+    // Decode operations from data
+    (Call[] memory calls) = abi.decode(ops.data[1:], (Call[]));
+    
+    // Execute each call
+    for (uint256 i = 0; i < calls.length; i++) {
+        Call memory call = calls[i];
+        
+        // Execute call from account context
+        (bool success, bytes memory returnData) = call.target.call{
+            value: call.value
+        }(call.data);
+        
+        require(success, ExecutionFailed(returnData));
+    }
+}
+```
+
+**Operation Types:**
+
+<Accordion title="Token Transfers">
+  ```solidity
+  // ERC20 transfer
+  Call({
+      target: tokenAddress,
+      value: 0,
+      data: abi.encodeCall(IERC20.transfer, (recipient, amount))
+  })
+  ```
+</Accordion>
+
+<Accordion title="Token Swaps">
+  ```solidity
+  // Uniswap swap
+  Call({
+      target: swapRouter,
+      value: 0,
+      data: abi.encodeCall(
+          ISwapRouter.exactInputSingle,
+          (swapParams)
+      )
+  })
+  ```
+</Accordion>
+
+<Accordion title="Multi-Step Operations">
+  ```solidity
+  // Approve + Swap + Transfer
+  Call[] memory calls = new Call[](3);
+  calls[0] = approveCall;
+  calls[1] = swapCall;
+  calls[2] = transferCall;
+  ```
+</Accordion>
+
+## Adapter Integration
+
+The IntentExecutorAdapter forwards calls from Router to IntentExecutor:
+
+```solidity IntentExecutorAdapter.sol
+contract IntentExecutorAdapter is AdapterBase {
+    address internal immutable EXECUTOR;
+    
+    function handleFill_intentExecutor_handleCompactTargetOps(
+        bytes calldata executorCalldata
+    ) external payable onlyViaRouter returns (bytes4) {
+        // Forward to executor with correct selector
+        EXECUTOR.passthrough(
+            COMPACT_INTENT_SELECTOR,
+            executorCalldata
+        );
+        return this.handleFill_intentExecutor_handleCompactTargetOps.selector;
+    }
+}
+```
+
+### Execution Path
+
+<Steps>
+  <Step title="Router Receives Fill">
+    User/solver submits fill operation to Router
+  </Step>
+  <Step title="Adapter Delegatecall">
+    Router delegatecalls IntentExecutorAdapter
+  </Step>
+  <Step title="Forward to Executor">
+    Adapter forwards call to IntentExecutor
+  </Step>
+  <Step title="Validate & Execute">
+    Executor validates signatures and executes operations
+  </Step>
+</Steps>
+
+## Gas Optimizations
+
+### Transient Storage
+
+The executor uses transient storage for reentrancy protection:
+
+```solidity
+modifier nonReentrant() {
+    require(_reentrancyGuard == 0, ReentrancyGuardReentrantCall());
+    _reentrancyGuard = 1;
+    _;
+    _reentrancyGuard = 0;
+}
+```
+
+### Batch Execution
+
+Multiple operations execute in a single transaction:
+
+```solidity
+// Execute all operations atomically
+for (uint256 i = 0; i < calls.length; i++) {
+    _executeCall(calls[i]);
+}
+// All succeed or entire transaction reverts
+```
+
+### Trusted Execution Bypass
+
+Skips signature validation for trusted callers:
+
+```solidity
+// Traditional flow:
+// 1. Pre-claim sig validation ✅
+// 2. Resource unlock sig validation ✅
+// 3. Target ops sig validation ❌ Expensive!
+
+// Trusted execution:
+// 1. Pre-claim sig validation ✅
+// 2. Resource unlock sig validation ✅  
+// 3. executeOpsWithoutSignature ✅ Gas efficient!
+```
+
+<Info>
+**Gas Savings:** Trusted execution saves ~5,000-10,000 gas per operation by avoiding redundant ECDSA signature recovery.
+</Info>
+
+## Security Model
+
+<Warning>
+**Critical Security Features:**
+
+- **Signature Validation**: All operations require valid signatures (except trusted execution)
+- **Reentrancy Protection**: NonReentrant modifier on all entry points
+- **Atomic Execution**: All operations succeed or entire batch reverts
+- **Trusted Whitelist**: Only approved contracts can bypass signature validation
+- **ERC-7579 Compliance**: Standard module interface for smart accounts
+</Warning>
+
+### Signature Validation
+
+```solidity ValidateSignature.sol
+function _validateCompactSignature(
+    address sponsor,
+    Types.Operation calldata ops,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements
+) internal returns (bytes32 mandateHash) {
+    // Generate EIP-712 hash
+    bytes32 hash = _hashTypedData(
+        keccak256(abi.encode(
+            COMPACT_TYPEHASH,
+            sponsor,
+            ops,
+            otherElements
+        ))
+    );
+    
+    // Recover signer and validate
+    address signer = ECDSA.recover(hash, sigs.signature);
+    require(signer == sponsor, InvalidSignature());
+    
+    return hash;
+}
+```
+
+### Trusted Contract Whitelist
+
+```solidity TrustedExecution.sol
+function isTrustedContract(address caller) internal view returns (bool) {
+    // Check if caller is whitelisted arbiter
+    return ADDRESS_BOOK.isTrustedArbiter(caller);
+}
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Arbiters" icon="scale-balanced" href="/concepts/arbiters">
+    Learn how arbiters coordinate with intent execution
+  </Card>
+  <Card title="Fill & Claim" icon="arrows-turn-to-dots" href="/concepts/fill-and-claim">
+    Understand fill and claim operation types
+  </Card>
+</CardGroup>

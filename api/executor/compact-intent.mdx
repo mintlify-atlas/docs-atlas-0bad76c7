@@ -1,0 +1,343 @@
+---
+title: "CompactIntentExecutor"
+description: "Executor contract for cross-chain intents using The Compact protocol"
+---
+
+## Overview
+
+The `CompactIntentExecutor` enables secure cross-chain intent execution through a two-phase process using The Compact protocol for cross-chain verification.
+
+**Source:** `/src/executor/CompactIntent/CompactIntentExecutor.sol:41`
+
+### Two-Phase Execution Flow
+
+**Phase 1 (Origin Chain)**: `executePreClaimOpsWithCompactStub`
+- User signs an EIP-712 structured intent specifying cross-chain operations
+- Arbiter calls this function to execute pre-claim operations (e.g., token approvals)
+- Contract validates signature and computes claim hash for cross-chain verification
+
+**Phase 2 (Destination Chain)**: `executeTargetOpsWithCompactStub`
+- Arbiter provides proof of origin chain execution via claim hash
+- Contract validates the claim hash through The Compact protocol's verification system
+- If valid, executes the target operations on behalf of the user
+
+### Security Model
+
+The security relies on:
+- EIP-712 signatures for user authorization
+- The Compact protocol's cross-chain verification system
+- Router-only access control for cross-chain operations
+- Expiration timestamps to prevent stale execution
+
+## Structs
+
+### EIP712CompactStub
+
+Core Compact order data that remains consistent across all elements.
+
+```solidity
+struct EIP712CompactStub {
+    uint256 nonce;
+    uint256 expires;
+    uint256 notarizedChainId;
+}
+```
+
+<ParamField path="nonce" type="uint256">
+  Unique nonce for this Compact order to prevent replay attacks
+</ParamField>
+
+<ParamField path="expires" type="uint256">
+  Timestamp after which the entire Compact order expires
+</ParamField>
+
+<ParamField path="notarizedChainId" type="uint256">
+  Chain ID where the order was originally notarized/signed
+</ParamField>
+
+### EIP712ElementStubOrigin
+
+Stub data for EIP-712 element construction on origin chain.
+
+```solidity
+struct EIP712ElementStubOrigin {
+    bytes32[] otherElements;
+    uint128 minGas;
+    uint256 elementOffset;
+    bytes32 destOpsHash;
+    bytes32 tokenInHash;
+    bytes32 targetAttributesHash;
+    bytes32 qHash;
+}
+```
+
+<ParamField path="otherElements" type="bytes32[]">
+  Array of other element hashes in the Compact Merkle tree
+</ParamField>
+
+<ParamField path="minGas" type="uint128">
+  Minimum gas required for executing operations
+</ParamField>
+
+<ParamField path="elementOffset" type="uint256">
+  Index position where this element should be inserted in the otherElements array
+</ParamField>
+
+<ParamField path="destOpsHash" type="bytes32">
+  Hash of target operations that will be executed on destination chain
+</ParamField>
+
+<ParamField path="tokenInHash" type="bytes32">
+  Hash of input token details for this element
+</ParamField>
+
+<ParamField path="targetAttributesHash" type="bytes32">
+  Pre-computed hash of target attributes (account, tokenOut, chain, expires)
+</ParamField>
+
+<ParamField path="qHash" type="bytes32">
+  Hash of the qualifier data specific to this element
+</ParamField>
+
+### EIP712ElementStubDestination
+
+Stub data for EIP-712 element construction on destination chain.
+
+```solidity
+struct EIP712ElementStubDestination {
+    address sponsor;
+    bytes32[] otherElements;
+    uint256 elementOffset;
+    bytes32 preClaimOpsHash;
+    bytes32 tokenInHash;
+    bytes32 tokenOutHash;
+    uint256 fillExpires;
+    bytes32 qHash;
+}
+```
+
+<ParamField path="sponsor" type="address">
+  Address that sponsored the original Compact order
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]">
+  Array of other element hashes in the Compact Merkle tree
+</ParamField>
+
+<ParamField path="elementOffset" type="uint256">
+  Index position where this element should be inserted in the otherElements array
+</ParamField>
+
+<ParamField path="preClaimOpsHash" type="bytes32">
+  Hash of pre-claim operations that were executed on origin chain
+</ParamField>
+
+<ParamField path="tokenInHash" type="bytes32">
+  Hash of input token details for this element
+</ParamField>
+
+<ParamField path="tokenOutHash" type="bytes32">
+  Hash of output token details for this element
+</ParamField>
+
+<ParamField path="fillExpires" type="uint256">
+  Timestamp after which the fill operation expires
+</ParamField>
+
+<ParamField path="qHash" type="bytes32">
+  Hash of the qualifier data specific to this element
+</ParamField>
+
+## Functions
+
+### executePreClaimOpsWithCompactStub
+
+```solidity
+function executePreClaimOpsWithCompactStub(
+    address account,
+    EIP712CompactStub calldata compactStub,
+    EIP712ElementStubOrigin calldata elementStub,
+    Types.Operation calldata preClaimOps,
+    bytes calldata signature
+) external returns (bool sigOk, bool execOk)
+```
+
+Executes pre-claim operations on the origin chain before cross-chain transfer.
+
+<ParamField path="account" type="address" required>
+  The smart account address that owns the assets and signed the order
+</ParamField>
+
+<ParamField path="compactStub" type="EIP712CompactStub" required>
+  Core Compact order data (nonce, expires, notarized chain)
+</ParamField>
+
+<ParamField path="elementStub" type="EIP712ElementStubOrigin" required>
+  Element-specific data needed for origin chain execution
+</ParamField>
+
+<ParamField path="preClaimOps" type="Types.Operation" required>
+  Operations to execute before cross-chain transfer (e.g., token approvals)
+</ParamField>
+
+<ParamField path="signature" type="bytes" required>
+  EIP-712 signature from the account authorizing these operations
+</ParamField>
+
+**Returns:**
+- `sigOk` (bool): True if signature validation passed
+- `execOk` (bool): True if pre-claim operations executed successfully
+
+<Note>
+  The caller (arbiter) is responsible for facilitating the cross-chain transfer. The arbiter address is included in the element hash computation.
+</Note>
+
+### executeTargetOpsWithCompactStub
+
+```solidity
+function executeTargetOpsWithCompactStub(
+    address account,
+    address notarizedArbiter,
+    EIP712CompactStub calldata compactStub,
+    EIP712ElementStubDestination calldata elementStub,
+    Types.Operation calldata targetOps,
+    bytes calldata signature
+) external onlyRouter returns (bytes32 claimHash)
+```
+
+Executes target operations on the destination chain with claim hash verification.
+
+<ParamField path="account" type="address" required>
+  The recipient account address for the target operations
+</ParamField>
+
+<ParamField path="notarizedArbiter" type="address" required>
+  The arbiter address that notarized the cross-chain transfer
+</ParamField>
+
+<ParamField path="compactStub" type="EIP712CompactStub" required>
+  Core Compact order data (nonce, expires, notarized chain)
+</ParamField>
+
+<ParamField path="elementStub" type="EIP712ElementStubDestination" required>
+  Element-specific data needed for destination chain execution
+</ParamField>
+
+<ParamField path="targetOps" type="Types.Operation" required>
+  Operations to execute on the destination chain
+</ParamField>
+
+<ParamField path="signature" type="bytes" required>
+  EIP-712 signature authorizing the target operations
+</ParamField>
+
+**Returns:** `bytes32` - The computed claim hash used for verification
+
+<Warning>
+  This function can only be called by the authorized router contract. Direct calls will revert with `OnlyRouter()` error.
+</Warning>
+
+### isCompactIntentNonceConsumed
+
+```solidity
+function isCompactIntentNonceConsumed(
+    uint256 nonce,
+    address account
+) external view returns (bool used)
+```
+
+Checks if a nonce has been used for a specific account.
+
+<ParamField path="nonce" type="uint256" required>
+  The nonce value to check
+</ParamField>
+
+<ParamField path="account" type="address" required>
+  The account address that owns the nonce
+</ParamField>
+
+**Returns:** `bool` - True if the nonce has been consumed, false otherwise
+
+## Execution Process
+
+### Origin Chain (Phase 1)
+
+1. **Hash Computation**: Reconstruct element hash using caller as arbiter
+2. **Merkle Tree**: Build complete Compact Merkle tree with all elements
+3. **Claim Hash**: Compute final EIP-712 claim hash
+4. **Signature Validation**: Verify user's signature authorizing the operations
+5. **Nonce Consumption**: Mark nonce as used to prevent replay
+6. **Execution**: Execute pre-claim operations (typically token approvals)
+
+### Destination Chain (Phase 2)
+
+1. **Hash Reconstruction**: Recreate element hash from stub data
+2. **Validation**: Check correct chain and expiration
+3. **Merkle Tree**: Build complete Compact Merkle tree
+4. **Claim Hash**: Compute EIP-712 claim hash (must match origin)
+5. **Signature Validation**: Verify signature against claim hash
+6. **Nonce Consumption**: Mark nonce as used to prevent replay
+7. **Execution**: Execute target operations on destination chain
+
+## Example Usage
+
+```solidity
+// Origin chain: Execute pre-claim operations
+(bool sigOk, bool execOk) = intentExecutor.executePreClaimOpsWithCompactStub(
+    accountAddress,
+    EIP712CompactStub({
+        nonce: 1,
+        expires: block.timestamp + 1 hours,
+        notarizedChainId: 8453 // Base
+    }),
+    elementStub,
+    preClaimOps,
+    userSignature
+);
+
+require(sigOk && execOk, "Execution failed");
+
+// Destination chain: Execute target operations (via router)
+bytes32 claimHash = router.executeTargetOpsWithCompactStub(
+    recipientAddress,
+    arbiterAddress,
+    compactStub,
+    destElementStub,
+    targetOps,
+    userSignature
+);
+```
+
+## Error Handling
+
+<ResponseField name="InvalidSignature" type="error">
+  Thrown when signature validation fails
+</ResponseField>
+
+<ResponseField name="InvalidParams" type="error">
+  Thrown when fill expiration has passed or parameters are invalid
+</ResponseField>
+
+<ResponseField name="OnlyRouter" type="error">
+  Thrown when `executeTargetOpsWithCompactStub` is called by non-router address
+</ResponseField>
+
+## Security Considerations
+
+<Warning>
+  **Nonce Management**: Each Compact intent uses a unique nonce to prevent replay attacks. Nonces are consumed on both origin and destination chains.
+</Warning>
+
+<Warning>
+  **Expiration Validation**: Both the overall order expiration (`expires`) and fill expiration (`fillExpires`) are validated. Ensure adequate time windows.
+</Warning>
+
+<Tip>
+  **Claim Hash Matching**: The claim hash computed on the destination chain must exactly match the one from the origin chain. All element parameters must be provided correctly.
+</Tip>
+
+## Related
+
+- [IntentExecutor](/api/executor/intent-executor) - Main executor contract
+- [Permit2IntentExecutor](/api/executor/permit2-intent) - Permit2-based execution
+- [StandaloneIntentExecutor](/api/executor/standalone-intent) - Self-contained execution

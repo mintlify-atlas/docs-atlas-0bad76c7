@@ -1,80 +1,447 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quick Start Guide'
+description: 'Get started with Warp Router integration for solvers and relayers'
+keywords: ['integration', 'solver', 'relayer', 'quickstart', 'tutorial']
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
+This guide will help you integrate Warp Router into your solver or relayer in minutes. By the end, you'll understand how to execute fill and claim operations, manage solver contexts, and optimize for gas efficiency.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+Before you begin, ensure you have:
+
+<Check>Solidity ^0.8.28 development environment</Check>
+<Check>Basic understanding of delegatecall patterns</Check>
+<Check>Familiarity with either TheCompact or Permit2 protocols</Check>
+
+## Installation
+
+<Steps>
+  <Step title="Install dependencies">
+    Add Warp Router to your project dependencies:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    forge install rhinestonewtf/warp-router
+    ```
+  </Step>
+  
+  <Step title="Import the Router interface">
+    Import the Router interface in your contract:
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    ```solidity
+    import { IRouter } from "warp-router/src/interfaces/IRouter.sol";
+    ```
+  </Step>
+  
+  <Step title="Connect to the Router">
+    Initialize the Router in your contract:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```solidity
+    contract MySolver {
+        IRouter public immutable router;
+        
+        constructor(address _router) {
+            router = IRouter(_router);
+        }
+    }
+    ```
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Understanding Solver Context
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+The solver context is a critical component that allows you to pass settlement-specific data to adapters. Each adapter defines its own context format.
 
-### Step 3: Go live
+### Solver Context Format
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+When the Router calls an adapter, it appends the solver context using:
 
-## Next steps
+```solidity
+abi.encodePacked(adapterCalldata, relayerContext, uint256(relayerContext.length))
+```
 
-Now that you have your docs running, explore these key features:
+The resulting calldata structure looks like this:
+
+![Solver context structure](/images/solvercontext.png)
+
+### Example: SameChainAdapter Context
+
+The SameChainAdapter expects the simplest possible context - just the recipient address for input tokens:
+
+```solidity src/arbiters/samechain/SameChainAdapter.sol
+function _tokenInRecipient() internal pure returns (address tokenInRecipient) {
+    (uint256 relayerContextLength, bytes calldata relayerContext) = _loadRelayerContext();
+    require(relayerContextLength == 20, InvalidRelayerContext());
+    // The first 20 bytes are the tokenIn recipient address
+    return address(bytes20(relayerContext[:20]));
+}
+```
+
+**For solvers integrating with SameChainAdapter:**
+
+```solidity
+// Prepare solver context - just the recipient address
+address myRecipientAddress = 0x123...; // Where you want input tokens sent
+bytes memory relayerContext = abi.encodePacked(myRecipientAddress);
+
+// Call the router with this context
+router.routeFill(relayerContext, adapterCalldata);
+```
+
+<Tip>Always check the adapter's documentation to understand its expected context format. Incorrect context encoding will cause transactions to revert.</Tip>
+
+## Executing Fill Operations
+
+Fill operations are the core of settlement execution. Here's how to execute them:
+
+### Standard Fill Route
+
+<Steps>
+  <Step title="Prepare adapter calldata">
+    Encode your fill operation with the 4-byte function selector:
+    
+    ```solidity
+    bytes memory adapterCalldata = abi.encodeWithSelector(
+        ISameChainAdapter.samechain_compact_handleFill.selector,
+        fillData  // Your fill parameters
+    );
+    ```
+  </Step>
+  
+  <Step title="Prepare solver context">
+    Create your solver context with settlement-specific data:
+    
+    ```solidity
+    // For SameChainAdapter: just the recipient address
+    address tokenInRecipient = msg.sender;
+    bytes memory relayerContext = abi.encodePacked(tokenInRecipient);
+    ```
+  </Step>
+  
+  <Step title="Execute the fill">
+    Call the router to execute the fill:
+    
+    ```solidity
+    router.routeFill(relayerContext, adapterCalldata);
+    ```
+  </Step>
+</Steps>
+
+### Complete Fill Example
+
+```solidity
+contract MySolver {
+    IRouter public immutable router;
+    
+    function executeFill(
+        Types.Order calldata order,
+        Types.Signatures calldata signatures,
+        bytes32[] calldata otherElements,
+        bytes calldata allocatorData
+    ) external {
+        // 1. Prepare fill data
+        ISameChainAdapter.FillDataCompact memory fillData = 
+            ISameChainAdapter.FillDataCompact({
+                order: order,
+                userSigs: signatures,
+                otherElements: otherElements,
+                allocatorData: allocatorData
+            });
+        
+        // 2. Encode adapter calldata
+        bytes memory adapterCalldata = abi.encodeWithSelector(
+            ISameChainAdapter.samechain_compact_handleFill.selector,
+            fillData
+        );
+        
+        // 3. Prepare solver context
+        bytes memory relayerContext = abi.encodePacked(msg.sender);
+        
+        // 4. Execute fill
+        router.routeFill(relayerContext, adapterCalldata);
+    }
+}
+```
+
+<Warning>Fill operations require atomic signatures from the Router's designated atomic signer. Ensure you have proper authorization before executing fills.</Warning>
+
+## Executing Batch Fills (Optimized)
+
+For gas-optimized batch operations, use the `optimized_routeFill921336808` function:
+
+<Steps>
+  <Step title="Prepare multiple adapter calldatas">
+    Create an array of adapter calldatas for your batch:
+    
+    ```solidity
+    bytes[] memory adapterCalldatas = new bytes[](orderCount);
+    for (uint i = 0; i < orderCount; i++) {
+        adapterCalldatas[i] = abi.encodeWithSelector(
+            ISameChainAdapter.samechain_compact_handleFill.selector,
+            fillDataArray[i]
+        );
+    }
+    ```
+  </Step>
+  
+  <Step title="Encode and hash the batch">
+    Encode the array and compute its hash:
+    
+    ```solidity
+    bytes memory encoded = abi.encode(adapterCalldatas);
+    bytes32 hash = keccak256(encoded);
+    ```
+  </Step>
+  
+  <Step title="Get atomic signature">
+    Obtain a signature from the atomic signer:
+    
+    ```solidity
+    // Off-chain: sign the hash with the atomic signer's private key
+    bytes memory atomicSig = getAtomicSignature(hash);
+    ```
+  </Step>
+  
+  <Step title="Prepare solver contexts">
+    Create context for each operation:
+    
+    ```solidity
+    bytes[] memory relayerContexts = new bytes[](orderCount);
+    for (uint i = 0; i < orderCount; i++) {
+        relayerContexts[i] = abi.encodePacked(recipientAddresses[i]);
+    }
+    ```
+  </Step>
+  
+  <Step title="Execute optimized batch">
+    Call the optimized fill function:
+    
+    ```solidity
+    router.optimized_routeFill921336808(
+        relayerContexts,
+        encoded,
+        atomicSig
+    );
+    ```
+  </Step>
+</Steps>
+
+<Info>The optimized batch function provides significant gas savings through adapter caching and reduced calldata overhead. Use it for all multi-operation batches.</Info>
+
+## Executing Claim Operations
+
+Claim operations unlock user resources from protocols. Unlike fills, they don't require atomic signatures:
+
+### Single Claim
+
+```solidity
+function executeClaim(
+    Types.Order calldata order,
+    Types.Signatures calldata signatures
+) external {
+    // Prepare claim calldata
+    bytes memory claimCalldata = abi.encodeWithSelector(
+        ISameChainAdapter.samechain_compact_handleClaim.selector,
+        order,
+        signatures
+    );
+    
+    // Prepare context (if needed by adapter)
+    bytes memory relayerContext = abi.encodePacked(msg.sender);
+    
+    // Execute claim
+    router.routeClaim(relayerContext, claimCalldata);
+}
+```
+
+### Batch Claims
+
+```solidity
+function executeBatchClaims(
+    Types.Order[] calldata orders,
+    Types.Signatures[] calldata signatures
+) external {
+    uint256 claimCount = orders.length;
+    bytes[] memory claimCalldatas = new bytes[](claimCount);
+    bytes[] memory relayerContexts = new bytes[](claimCount);
+    
+    for (uint i = 0; i < claimCount; i++) {
+        claimCalldatas[i] = abi.encodeWithSelector(
+            ISameChainAdapter.samechain_compact_handleClaim.selector,
+            orders[i],
+            signatures[i]
+        );
+        relayerContexts[i] = abi.encodePacked(msg.sender);
+    }
+    
+    router.routeClaim(relayerContexts, claimCalldatas);
+}
+```
+
+<Note>Claim operations rely on protocol-level authorization (TheCompact or Permit2 signatures) rather than atomic Router signatures.</Note>
+
+## Gas Optimization Tips
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Batch Similar Operations" icon="layer-group">
+    Group operations using the same adapter to leverage caching. Each cache hit saves approximately 2,100 gas.
+  </Card>
+  <Card title="Use Optimized Routes" icon="gauge-high">
+    The `optimized_routeFill921336808` function provides significant gas savings through efficient encoding and caching.
+  </Card>
+  <Card title="Special Selectors" icon="bolt">
+    Use built-in selectors like `singleCall` and `multiCall` when possible to avoid adapter overhead (saves 2,600+ gas).
+  </Card>
+  <Card title="Minimize Context Size" icon="compress">
+    Keep solver context as small as possible to reduce calldata costs, especially for batch operations.
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Working with Same-Chain Settlements
+
+Same-chain settlements follow a specific 3-step pattern:
+
+<Steps titleSize="p">
+  <Step title="Pre-funding">
+    Solver pre-funds the recipient with output tokens before claiming input tokens:
+    
+    ```solidity src/arbiters/samechain/SameChainAdapter.sol
+    function samechain_compact_handleFill(FillDataCompact calldata fillData) 
+        external payable onlyViaRouter returns (bytes4) 
+    {
+        // Extract the solver's recipient address for input tokens
+        address tokenInRecipient = _tokenInRecipient();
+        
+        // Pre-fund the user with output tokens
+        _prefundRecipient(msg.sender, fillData.order.recipient, fillData.order.tokenOut);
+        
+        // ...
+    }
+    ```
+    
+    <Info>Pre-funding prevents order manipulation attacks where malicious actors could front-run settlements.</Info>
+  </Step>
+  
+  <Step title="Resource unlock">
+    Arbiter validates signatures and unlocks user's input resources:
+    
+    ```solidity
+    SameChainArbiter(ARBITER).handleCompact_NotarizedChain({
+        order: fillData.order,
+        sigs: fillData.userSigs,
+        otherElements: fillData.otherElements,
+        elementOffset: 0,
+        notarizedChainId: block.chainid,
+        allocatorData: fillData.allocatorData,
+        relayer: tokenInRecipient  // Solver receives input tokens here
+    });
+    ```
+  </Step>
+  
+  <Step title="Completion">
+    The arbiter transfers input tokens to the solver's designated recipient, completing the atomic swap.
+  </Step>
+</Steps>
+
+## Security Considerations
+
+<Warning>Always validate signatures before executing operations. The Router's atomic signature system is your primary security mechanism.</Warning>
+
+### For Solvers
+
+<AccordionGroup>
+  <Accordion title="Signature Requirements">
+    Fill operations require valid atomic signatures from the Router's designated atomic signer. Never attempt to bypass signature validation.
+  </Accordion>
+  
+  <Accordion title="Context Validation">
+    Ensure your solver context matches the adapter's expected format. Incorrect encoding will cause reverts and wasted gas.
+  </Accordion>
+  
+  <Accordion title="Batch Atomicity">
+    All operations in a batch succeed or revert together. Design your batches carefully to avoid partial execution scenarios.
+  </Accordion>
+  
+  <Accordion title="Gas Limits">
+    Account for pre-claim operation gas stipends when estimating total gas costs. Pre-claim operations receive dedicated gas allocations.
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Pattern 1: Simple Token Swap
+
+```solidity
+// Execute a simple same-chain token swap
+function executeSwap(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs
+) external {
+    bytes memory fillCalldata = abi.encodeWithSelector(
+        ISameChainAdapter.samechain_compact_handleFill.selector,
+        ISameChainAdapter.FillDataCompact({
+            order: order,
+            userSigs: sigs,
+            otherElements: new bytes32[](0),
+            allocatorData: ""
+        })
+    );
+    
+    router.routeFill(
+        abi.encodePacked(msg.sender),
+        fillCalldata
+    );
+}
+```
+
+### Pattern 2: Batch Operations with Same Adapter
+
+```solidity
+// Maximize gas efficiency by batching operations using the same adapter
+function executeBatchSwaps(
+    Types.Order[] calldata orders,
+    Types.Signatures[] calldata sigs,
+    bytes memory atomicSig
+) external {
+    bytes[] memory calldatas = new bytes[](orders.length);
+    bytes[] memory contexts = new bytes[](orders.length);
+    
+    for (uint i = 0; i < orders.length; i++) {
+        calldatas[i] = abi.encodeWithSelector(
+            ISameChainAdapter.samechain_compact_handleFill.selector,
+            ISameChainAdapter.FillDataCompact({
+                order: orders[i],
+                userSigs: sigs[i],
+                otherElements: new bytes32[](0),
+                allocatorData: ""
+            })
+        );
+        contexts[i] = abi.encodePacked(msg.sender);
+    }
+    
+    router.optimized_routeFill921336808(
+        contexts,
+        abi.encode(calldatas),
+        atomicSig
+    );
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Guide" icon="diagram-project" href="/architecture">
+    Dive deep into the Router, Adapter, and Arbiter layers
+  </Card>
+  <Card title="API Reference" icon="code" href="/api">
+    Explore the complete API documentation
+  </Card>
+  <Card title="Advanced Patterns" icon="wand-magic-sparkles" href="/advanced">
+    Learn advanced integration patterns and optimizations
+  </Card>
+  <Card title="Protocol Adapters" icon="puzzle-piece" href="/adapters">
+    Explore available protocol adapters and their capabilities
+  </Card>
+</CardGroup>

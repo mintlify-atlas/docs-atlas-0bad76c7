@@ -1,0 +1,314 @@
+---
+title: 'SameChainArbiter'
+description: 'Arbiter contract for validating and executing same-chain order settlements'
+icon: 'link'
+---
+
+## Overview
+
+SameChainArbiter handles the core settlement logic for orders where both origin and execution occur on the same blockchain. It provides atomic settlement guarantees while supporting both Compact and Permit2 protocols with their respective validation and execution patterns.
+
+<Info>
+  SameChainArbiter is whitelisted as a trusted contract in the IntentExecutor, enabling gas optimization where target operations can be executed without additional signature validation.
+</Info>
+
+## Architecture
+
+### Same-Chain Settlement Processing
+
+The arbiter implements the critical resource unlock and execution phase of same-chain settlement. It works in coordination with SameChainAdapter, which pre-funds recipients before calling the arbiter.
+
+<Steps>
+  <Step title="Signature validation">
+    Verifies user signatures against order data and metadata.
+  </Step>
+  <Step title="Pre-claim execution">
+    Handles pre-claim operations (approvals, setup) for Compact protocol.
+  </Step>
+  <Step title="Resource unlocking">
+    Claims and unlocks user input tokens from the appropriate protocol.
+  </Step>
+  <Step title="Target execution">
+    Executes user-specified operations (swaps, transfers) on target assets.
+  </Step>
+</Steps>
+
+### Dual Protocol Support
+
+<Tabs>
+  <Tab title="Compact Protocol">
+    **Compact Protocol Flow:**
+    - Validates complex signatures and metadata (otherElements, allocatorData)
+    - Executes pre-claim operations with allocated gas stipends
+    - Handles notarized chain validation and resource unlock
+    - Supports multi-step operations and complex authorization patterns
+  </Tab>
+  <Tab title="Permit2 Protocol">
+    **Permit2 Protocol Flow:**
+    - Streamlined validation with simplified signature requirements
+    - Direct resource unlock without pre-claim complexity
+    - Optimized for gas efficiency and simple token operations
+    - Lower overhead for straightforward token transfers and swaps
+  </Tab>
+</Tabs>
+
+## Constructor
+
+```solidity
+constructor(
+    address router,
+    address compact,
+    address addressBook
+)
+```
+
+<ParamField path="router" type="address" required>
+  The Router contract address that will call this arbiter. Used for access control to ensure only authorized settlement requests.
+</ParamField>
+
+<ParamField path="compact" type="address" required>
+  The Compact protocol contract address for resource unlocking and validation. Handles the core authorization and token claim logic for Compact orders.
+</ParamField>
+
+<ParamField path="addressBook" type="address" required>
+  The AddressBook contract containing protocol configuration and addresses. Provides centralized configuration for protocol contracts and parameters.
+</ParamField>
+
+<Warning>
+  All three addresses are stored as immutable to prevent malicious redirection. The Router address specifically enforces that only authorized adapters can trigger settlement.
+</Warning>
+
+## Compact Protocol Settlement
+
+### handleCompact_NotarizedChain
+
+```solidity
+function handleCompact_NotarizedChain(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements,
+    bytes calldata allocatorData,
+    address relayer
+) external onlyRouter returns (address sponsor, uint256 nonce)
+```
+
+Handles complete Compact protocol same-chain settlement with full feature support.
+
+<Note>
+  This function assumes notarized chain execution for all multichain intents that require same-chain settlement. Exogenous chain claims are not implemented for simplicity.
+</Note>
+
+#### Settlement Flow
+
+<Steps>
+  <Step title="Pre-claim validation and execution">
+    Validates order signatures and metadata using `_compactPreClaimOps`. Executes any pre-claim operations (approvals, setup calls) with allocated gas stipend. Generates mandate hash for subsequent resource unlock validation.
+
+    ```solidity
+    bytes32 mandateHash = _compactPreClaimOps(
+        order,
+        sigs,
+        otherElements,
+        0,
+        block.chainid
+    );
+    ```
+  </Step>
+  <Step title="Resource unlock and depositing">
+    Calls `_unlockNotarizedChain` to validate signatures against mandate hash. Unlocks user's input tokens from the Compact protocol contracts. Transfers input tokens to the specified relayer (solver's recipient address).
+
+    ```solidity
+    _unlockNotarizedChain({
+        order: order,
+        otherElements: otherElements,
+        originChainSig: sigs.notarizedClaimSig,
+        allocatorData: allocatorData,
+        depositor: relayer,
+        mandateHash: mandateHash
+    });
+    ```
+  </Step>
+  <Step title="Target operation execution">
+    Executes user-specified target operations using SmartExecutionLib. Operations run without requiring additional signatures (mandate-based execution). Typically includes swaps, transfers, or other token operations on user's behalf.
+
+    <Info>
+      Target operations are only executed when ALL conditions are met:
+      1. Target operations are specified (non-empty)
+      2. Recipient equals sponsor (self-execution pattern)
+      3. Target operations are NOT using execution emissary pattern
+      4. Signature mode match: target ops sig mode equals pre-claim ops sig mode, OR pre-claim ops are empty
+    </Info>
+
+    ```solidity
+    if (order.targetOps.data.length != 0) {
+        address recipient = order.recipient;
+        SmartExecutionLib.SigMode targetOpsSigMode = order.targetOps.extractSigMode();
+        bool sigModeMatch = (order.preClaimOps.data.length == 0 || 
+                             targetOpsSigMode == order.preClaimOps.extractSigMode());
+        if (recipient == sponsor && 
+            !targetOpsSigMode.isExecutionEmissary() && 
+            sigModeMatch) {
+            EXECUTOR.executeOpsWithoutSignature(recipient, order.targetOps);
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  Complete order specification including tokens, operations, deadlines, and metadata. Contains all information needed for settlement validation and execution.
+</ParamField>
+
+<ParamField path="sigs" type="Types.Signatures" required>
+  Container for required signatures including notarized claim sig and optional pre-claim sig. Used to validate user authorization for the settlement.
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]" required>
+  Array of additional order element hashes for complex multi-element orders. Typically empty for single-element same-chain settlements.
+</ParamField>
+
+<ParamField path="allocatorData" type="bytes" required>
+  Protocol-specific data for the Compact allocator contract. Contains parameters needed for resource allocation and validation.
+</ParamField>
+
+<ParamField path="relayer" type="address" required>
+  Address where input tokens will be deposited after successful unlock. Typically the solver's address or a solver-controlled withdrawal contract.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="sponsor" type="address">
+  The address of the order sponsor who authorized this settlement.
+</ResponseField>
+
+<ResponseField name="nonce" type="uint256">
+  The nonce value from the order used for replay protection and tracking.
+</ResponseField>
+
+<Tip>
+  **Trusted Execution Model**: SameChainArbiter's trusted status in IntentExecutor allows target operations to execute without signature validation after successful permit2/compact transfers, saving gas while maintaining security through the initial validation gate.
+</Tip>
+
+## Permit2 Protocol Settlement
+
+### handlePermit2
+
+```solidity
+function handlePermit2(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    address relayer
+) external onlyRouter returns (address sponsor, uint256 nonce)
+```
+
+Handles streamlined Permit2 protocol same-chain settlement with optimized efficiency.
+
+<Info>
+  The Permit2 flow is optimized for straightforward token operations where the complexity of pre-claim operations and gas stipends is unnecessary, providing significant gas savings.
+</Info>
+
+#### Settlement Flow
+
+<Steps>
+  <Step title="Pre-claim validation">
+    Validates order signatures using `_permit2PreClaimOps` for Permit2-specific requirements. Generates mandate hash for subsequent resource unlock without complex pre-claim operations. Skips gas stipend allocation and complex setup operations for efficiency.
+
+    ```solidity
+    bytes32 mandateHash = _permit2PreClaimOps(order, sigs);
+    ```
+  </Step>
+  <Step title="Resource unlock and depositing">
+    Calls `_unlockPermit2` with simplified signature validation against mandate hash. Unlocks user's input tokens directly from Permit2 protocol contracts. Transfers input tokens to the specified relayer address without intermediate steps.
+
+    ```solidity
+    _unlockPermit2({
+        order: order,
+        sig: sigs.notarizedClaimSig,
+        depositor: relayer,
+        mandateHash: mandateHash
+    });
+    ```
+  </Step>
+  <Step title="Target operation execution">
+    Executes user-specified target operations using the same SmartExecutionLib as Compact. Operations typically simpler for Permit2 (direct transfers, basic swaps). Maintains atomic execution guarantees despite simplified flow.
+
+    <Warning>
+      Target operations are only executed if:
+      1. Recipient equals sponsor AND
+      2. Target operations are NOT using execution emissary pattern
+      
+      If conditions not met, execution is skipped to maintain security.
+    </Warning>
+  </Step>
+</Steps>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  Complete order specification including tokens, operations, and metadata. Same structure as Compact but typically with simpler target operations.
+</ParamField>
+
+<ParamField path="sigs" type="Types.Signatures" required>
+  Container for required signatures, primarily the notarized claim signature. Permit2 typically requires fewer signatures than full Compact protocol.
+</ParamField>
+
+<ParamField path="relayer" type="address" required>
+  Address where input tokens will be deposited after successful unlock. Receives tokens directly from Permit2 unlock without intermediate processing.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="sponsor" type="address">
+  The address of the order sponsor who authorized this settlement.
+</ResponseField>
+
+<ResponseField name="nonce" type="uint256">
+  The nonce value from the order used for replay protection and tracking.
+</ResponseField>
+
+<Tip>
+  More gas-efficient than Compact due to simplified validation and unlock process. Optimized for simple token operations rather than complex multi-step settlements.
+</Tip>
+
+## Security Model
+
+<AccordionGroup>
+  <Accordion title="Access Control">
+    Only Router can call arbiter functions via the `onlyRouter` modifier. This prevents unauthorized settlement attempts and ensures proper validation flow.
+  </Accordion>
+  <Accordion title="Signature Security">
+    All user signatures validated before any asset movements or operations occur. Maintains cryptographic proof of user authorization throughout settlement.
+  </Accordion>
+  <Accordion title="Atomic Execution">
+    Either entire settlement succeeds or reverts completely. If validation fails, the entire transaction reverts including pre-funding.
+  </Accordion>
+  <Accordion title="Trusted Executor Model">
+    SameChainArbiter is whitelisted as a trusted contract in the IntentExecutor. This enables target operations to execute without additional signature validation after successful resource unlock, reducing gas costs while maintaining security.
+  </Accordion>
+</AccordionGroup>
+
+## Errors
+
+### OrderExpired
+
+```solidity
+error OrderExpired();
+```
+
+Thrown when an order has expired based on its `fillDeadline`. Settlement operations validate that `order.fillDeadline >= block.timestamp` before processing.
+
+## Events
+
+### SameChainTargetOpsNotHandled
+
+```solidity
+event SameChainTargetOpsNotHandled();
+```
+
+Emitted when target operations are not executed due to recipient/sponsor mismatch or emissary pattern. This event helps track when operations are skipped for security reasons.
+
+## Source Code Reference
+
+Location: `/src/arbiters/samechain/SameChainArbiter.sol:81`

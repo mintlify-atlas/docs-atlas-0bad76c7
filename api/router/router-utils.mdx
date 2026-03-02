@@ -1,0 +1,88 @@
+---
+title: "RouterUtils"
+description: "Utility library providing helper functions for router operations"
+---
+
+## Overview
+
+RouterUtils is a utility contract that provides pure helper functions for router operations. It contains common checks and validations that can be used across the router system.
+
+## Functions
+
+### isContractDeployed
+
+Checks whether a contract is deployed at the specified address.
+
+```solidity
+function isContractDeployed(address addr) external view returns (bool)
+```
+
+<ParamField path="addr" type="address">
+  The address to check for contract deployment.
+</ParamField>
+
+**Returns:**
+- `bool`: True if a contract is deployed at the address, false otherwise
+
+Uses the EXTCODESIZE opcode via `.code.length` to determine if bytecode exists at the given address. Returns true for contracts, false for EOAs (Externally Owned Accounts) or undeployed addresses.
+
+<Note>
+This check will return false for addresses in the middle of construction, as constructor code is not yet stored at the address during deployment.
+</Note>
+
+**Example:**
+
+```solidity
+bool isContract = RouterUtils.isContractDeployed(0x1234...);
+if (isContract) {
+    // Address has contract code
+}
+```
+
+### getContractCode
+
+Returns the contract code for a given address.
+
+```solidity
+function getContractCode(address addr) external view returns (bytes memory)
+```
+
+<ParamField path="addr" type="address">
+  The address to retrieve contract code from.
+</ParamField>
+
+**Returns:**
+- `bytes`: The bytecode of the contract at the address, or empty bytes if none
+
+Retrieves the bytecode stored at the specified address. Returns an empty bytes array if no contract is deployed there.
+
+**Example:**
+
+```solidity
+bytes memory code = RouterUtils.getContractCode(0x1234...);
+if (code.length > 0) {
+    // Process contract bytecode
+}
+```
+
+## Use Cases
+
+### Contract Verification
+
+Use `isContractDeployed` to verify that an address contains contract code before attempting to interact with it:
+
+```solidity
+require(
+    RouterUtils.isContractDeployed(adapterAddress),
+    "Adapter not deployed"
+);
+```
+
+### Bytecode Analysis
+
+Use `getContractCode` to retrieve and analyze contract bytecode for validation or verification purposes:
+
+```solidity
+bytes memory adapterCode = RouterUtils.getContractCode(adapterAddress);
+// Perform bytecode analysis or verification
+```

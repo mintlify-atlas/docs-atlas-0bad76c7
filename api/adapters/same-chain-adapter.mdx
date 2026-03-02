@@ -1,0 +1,342 @@
+---
+title: SameChainAdapter
+description: Adapter for handling same-chain order settlement
+---
+
+## Overview
+
+`SameChainAdapter` orchestrates same-chain order settlement within the Warp Router ecosystem. This adapter handles cases where both order origin and execution occur on the same blockchain, eliminating cross-chain complexity while maintaining proper settlement guarantees through pre-funding and coordinated arbiter execution.
+
+**Source**: `src/arbiters/samechain/SameChainAdapter.sol`
+
+**Inherits**: `AdapterBasePrefund`, `SameChainArbiter`
+
+## Settlement Architecture
+
+Same-chain orders provide efficiency benefits by avoiding cross-chain coordination overhead. The settlement follows this critical 3-step process:
+
+1. **PRE-FUNDING**: Solver pre-funds the recipient with output tokens before claiming input tokens
+2. **RESOURCE UNLOCK**: Arbiter validates signatures and unlocks user's input resources
+3. **TARGET EXECUTION**: Final operations (swaps, transfers) are executed on behalf of the user
+
+## Dual Protocol Support
+
+This adapter supports both Compact and Permit2 protocols with different data requirements:
+
+- **Compact Protocol**: Full featured with pre-claim operations, gas stipends, and allocator data
+- **Permit2 Protocol**: Streamlined flow with simplified signature requirements
+
+Both protocols follow the same core settlement pattern but with protocol-specific validation.
+
+## Security Model
+
+- **Access Control**: Only Router can call fill functions (onlyViaRouter modifier)
+- **Pre-funding Safety**: Recipients receive output tokens before input tokens are unlocked
+- **Atomic Settlement**: If any step fails, the entire transaction reverts
+- **Signature Validation**: All user signatures validated by the arbiter before execution
+- **Nonce Protection**: Each order has unique nonce to prevent replay attacks
+
+## Data Structures
+
+### FillDataCompact
+
+```solidity
+struct FillDataCompact {
+    Types.Order order;
+    Types.Signatures userSigs;
+    bytes32[] otherElements;
+    bytes allocatorData;
+}
+```
+
+Data structure for Compact protocol same-chain order fills. Contains all necessary data for processing a Compact-based same-chain settlement.
+
+<ParamField path="order" type="Types.Order">
+  The complete order specification including tokens, operations, and metadata. Contains sponsor, recipient, nonce, deadlines, token amounts, and target operations.
+</ParamField>
+
+<ParamField path="userSigs" type="Types.Signatures">
+  Container for all required signatures (notarized claim sig and optional pre-claim sig). Signatures are validated by the arbiter to ensure user authorization.
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]">
+  Array of hashes for multi-element orders (empty for single-element same-chain orders). Used in complex multi-chain scenarios but typically empty for same-chain settlements.
+</ParamField>
+
+<ParamField path="allocatorData" type="bytes">
+  Protocol-specific data for the Compact allocator contract. Contains parameters needed for resource allocation and validation.
+</ParamField>
+
+### FillDataPermit2
+
+```solidity
+struct FillDataPermit2 {
+    Types.Order order;
+    Types.Signatures userSigs;
+}
+```
+
+Simplified data structure for Permit2-based same-chain settlements.
+
+<ParamField path="order" type="Types.Order">
+  The complete order specification including tokens, operations, and metadata. Same structure as Compact but typically with simpler target operations.
+</ParamField>
+
+<ParamField path="userSigs" type="Types.Signatures">
+  Container for required signatures, primarily the notarized claim signature. Permit2 typically requires fewer signatures than full Compact protocol.
+</ParamField>
+
+## Constructor
+
+```solidity
+constructor(
+    address router,
+    address compact,
+    address arbiter,
+    address addressBook
+)
+```
+
+Initializes the SameChainAdapter with Router and Arbiter integration.
+
+<ParamField path="router" type="address">
+  The Router contract address that will delegatecall this adapter. Must be a valid Router deployment with same-chain adapter support.
+</ParamField>
+
+<ParamField path="compact" type="address">
+  The Compact protocol contract address for handling Compact-based orders. Used for full-featured same-chain settlements with pre-claim operations.
+</ParamField>
+
+<ParamField path="arbiter" type="address">
+  The SameChainArbiter contract address that processes settlement logic.
+</ParamField>
+
+<ParamField path="addressBook" type="address">
+  The address book contract containing protocol addresses and configurations.
+</ParamField>
+
+## Fill Functions
+
+### samechain_compact_handleFill
+
+```solidity
+function samechain_compact_handleFill(
+    FillDataCompact calldata fillData
+) 
+    external 
+    payable 
+    onlyViaRouter 
+    returns (bytes4 selector)
+```
+
+Handles a same-chain order fill using the Compact protocol. Entry point for Compact-based same-chain settlements called exclusively by the Router.
+
+<Info>
+The Compact protocol provides full-featured order execution including:
+- Pre-claim operations (approvals, setup calls)
+- Gas stipend allocation for complex operations
+- Allocator data for protocol-specific validation
+- Multi-signature support for complex authorization flows
+</Info>
+
+<ParamField path="fillData" type="FillDataCompact">
+  Complete Compact protocol order data including signatures and metadata. Contains all information needed for settlement validation and execution.
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  This function's selector for Router IERC165 interface compliance. Enables Router to verify adapter capabilities before execution.
+</ResponseField>
+
+**Execution Flow**:
+1. Pre-funds recipient with output tokens
+2. Calls arbiter to validate and unlock resources
+3. Emits `RouterFilled` event
+4. Returns function selector
+
+**Function Selector**: `this.samechain_compact_handleFill.selector`
+
+### samechain_permit2_handleFill
+
+```solidity
+function samechain_permit2_handleFill(
+    FillDataPermit2 calldata fillData
+) 
+    external 
+    payable 
+    onlyViaRouter 
+    returns (bytes4 selector)
+```
+
+Handles a same-chain order fill using the Permit2 protocol. Entry point for Permit2-based same-chain settlements with streamlined flow optimized for simple token operations.
+
+<Info>
+The Permit2 protocol focuses on:
+- Simplified signature requirements
+- Lower gas costs for basic operations
+- Direct token authorization via Permit2 contract
+- Streamlined validation and execution flow
+</Info>
+
+<ParamField path="fillData" type="FillDataPermit2">
+  Permit2 protocol order data with essential signatures and order details. Contains simplified data structure optimized for efficient processing.
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  This function's selector for Router IERC165 interface compliance.
+</ResponseField>
+
+**Execution Flow**:
+1. Pre-funds recipient with output tokens
+2. Calls arbiter to validate and unlock resources
+3. Emits `RouterFilled` event
+4. Returns function selector
+
+**Function Selector**: `this.samechain_permit2_handleFill.selector`
+
+**Gas Optimization**: More gas-efficient than Compact protocol for simple token operations.
+
+## Internal Functions
+
+### _tokenInRecipient
+
+```solidity
+function _tokenInRecipient() internal pure returns (address tokenInRecipient)
+```
+
+Decodes the tokenIn recipient address from the solver context. Extracts the solver's designated recipient for input tokens from the Router's solver context.
+
+**Relayer Context Format**: `abi.encodePacked(address(recipient))` (20 bytes)
+
+**Returns**:
+
+<ResponseField name="tokenInRecipient" type="address">
+  The address where input tokens should be sent after arbiter processing. This is typically the solver's address or a solver-controlled contract.
+</ResponseField>
+
+### _handleCompactFill
+
+```solidity
+function _handleCompactFill(
+    FillDataCompact calldata fillData, 
+    address tokenInRecipient
+) internal
+```
+
+Internal implementation of Compact protocol same-chain settlement. Orchestrates the 3-step process:
+
+1. **PRE-FUNDING PHASE**: Transfers output tokens from solver to recipient
+2. **ARBITER COORDINATION**: Calls SameChainArbiter with order data and signatures
+3. **EVENT EMISSION**: Emits Filled event for off-chain tracking
+
+<ParamField path="fillData" type="FillDataCompact">
+  Complete Compact order data including signatures, allocator data, and gas stipend
+</ParamField>
+
+<ParamField path="tokenInRecipient" type="address">
+  Address where input tokens will be sent after arbiter processes the unlock. Typically the solver's address or a solver-controlled withdrawal contract.
+</ParamField>
+
+<Warning>
+Pre-funding occurs before any signature validation to ensure atomicity. If arbiter validation fails, the entire transaction reverts including pre-funding.
+</Warning>
+
+### _handlePermit2Fill
+
+```solidity
+function _handlePermit2Fill(
+    FillDataPermit2 calldata fillData, 
+    address tokenInRecipient
+) internal
+```
+
+Internal implementation of Permit2 protocol same-chain settlement with streamlined 3-step process optimized for gas efficiency.
+
+<ParamField path="fillData" type="FillDataPermit2">
+  Permit2 order data with simplified structure focused on essential settlement info
+</ParamField>
+
+<ParamField path="tokenInRecipient" type="address">
+  Address where input tokens will be deposited after successful validation. Receives tokens directly from Permit2 unlock without intermediate steps.
+</ParamField>
+
+## Interface Support
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 selector) 
+    public 
+    pure 
+    override(AdapterBase, ArbiterBase) 
+    returns (bool supported)
+```
+
+Checks if this adapter supports a specific function selector. Implements IERC165 interface detection for Router compatibility.
+
+<ParamField path="selector" type="bytes4">
+  The function selector to check for support
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="supported" type="bool">
+  True if the selector is supported by this adapter. Returns true for:
+  - `samechain_compact_handleFill.selector`
+  - `samechain_permit2_handleFill.selector`
+  - Any selectors supported by AdapterBase
+  - Any selectors supported by ArbiterBase
+</ResponseField>
+
+## Events
+
+### RouterFilled
+
+```solidity
+event RouterFilled(address indexed sponsor, uint256 indexed nonce)
+```
+
+Emitted when a same-chain order is successfully filled.
+
+<ParamField path="sponsor" type="address" indexed>
+  The address that sponsored the order
+</ParamField>
+
+<ParamField path="nonce" type="uint256" indexed>
+  The unique nonce of the filled order
+</ParamField>
+
+## Relayer Context
+
+The relayer data must be encoded as:
+
+```solidity
+abi.encodePacked(address(recipient))
+```
+
+Where `recipient` is the address that should receive the tokenIn payment. This address will be passed to the arbiter as the depositor for input tokens.
+
+**Length**: Exactly 20 bytes
+
+## Security Considerations
+
+<Warning>
+Pre-funding mechanism prevents order manipulation attacks where malicious actors could front-run settlements to claim input tokens without providing outputs.
+</Warning>
+
+- Only callable via Router delegatecall (enforced by `onlyViaRouter`)
+- All user signatures validated by arbiter before token movements
+- Atomic execution ensures either complete success or complete revert
+- Nonce system prevents replay attacks
+
+## Gas Optimization
+
+Same-chain operations are optimized for lower gas costs compared to cross-chain alternatives, with efficient pre-funding and single-transaction settlement. Permit2 variant provides additional gas savings for simple operations.
+
+## Related Contracts
+
+- [AdapterBase](/api/adapters/adapter-base) - Base adapter functionality
+- [SameChainArbiter](/api/arbiters/same-chain-arbiter) - Settlement validation and execution

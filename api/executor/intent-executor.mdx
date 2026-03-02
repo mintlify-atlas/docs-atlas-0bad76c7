@@ -1,0 +1,219 @@
+---
+title: "IntentExecutor"
+description: "Main executor contract implementing ERC-7579 module interface for multi-protocol intent execution"
+---
+
+## Overview
+
+The `IntentExecutor` contract is the main entry point for executing intents in the Warp Router system. It aggregates multiple intent execution mechanisms into a unified ERC-7579 module that can be installed on smart contract wallets.
+
+**Source:** `/src/executor/IntentExecutor.sol:33`
+
+### Key Features
+
+- **ERC-7579 Module Compliance**: Implements the executor module interface for modular account compatibility
+- **Multi-Protocol Support**: Unifies Compact, Permit2, and Standalone intent execution
+- **Cross-Chain Operations**: Enables secure cross-chain intent execution with signature validation
+- **Trusted Execution**: Supports execution from authorized parties without signature verification
+
+### Architecture
+
+The contract inherits from multiple executor implementations:
+
+- **CompactIntentExecutor**: Cross-chain intents using The Compact protocol
+- **Permit2IntentExecutor**: Gasless token approvals using Permit2
+- **StandaloneIntentExecutor**: Self-contained multi-chain execution
+- **TrustedExecution**: Operations from trusted parties
+- **ValidateSignature**: EIP-712 signature validation with emissary support
+
+## Constructor
+
+```solidity
+constructor(
+    address router,
+    address compact,
+    address allocator,
+    address addressBook,
+    address smartSessionEmissary
+)
+```
+
+Initializes the IntentExecutor with required dependencies for all execution types.
+
+<ParamField path="router" type="address" required>
+  The router contract address for cross-chain operations
+</ParamField>
+
+<ParamField path="compact" type="address" required>
+  The Compact protocol contract address for cross-chain transfers
+</ParamField>
+
+<ParamField path="allocator" type="address" required>
+  The RSAllocator contract address for resource allocation
+</ParamField>
+
+<ParamField path="addressBook" type="address" required>
+  The address book contract for managing trusted execution parties
+</ParamField>
+
+<ParamField path="smartSessionEmissary" type="address" required>
+  The smart session emissary contract for session key validation
+</ParamField>
+
+## ERC-7579 Module Interface
+
+### isModuleType
+
+```solidity
+function isModuleType(uint256 moduleTypeId) external pure returns (bool)
+```
+
+Identifies this contract as an ERC-7579 executor module.
+
+<ParamField path="moduleTypeId" type="uint256" required>
+  The module type identifier to check against
+</ParamField>
+
+**Returns:** `bool` - True if moduleTypeId matches `MODULE_TYPE_EXECUTOR`, false otherwise
+
+### isInitialized
+
+```solidity
+function isInitialized(address smartAccount) external view returns (bool)
+```
+
+Checks if the executor module is initialized for a specific smart account.
+
+<ParamField path="smartAccount" type="address" required>
+  The smart account address to check initialization status for
+</ParamField>
+
+**Returns:** `bool` - True if the module is initialized for the account, false otherwise
+
+### onInstall
+
+```solidity
+function onInstall(bytes calldata data) external
+```
+
+Handles module installation on a smart account. Sets initialization state for the calling account.
+
+<ParamField path="data" type="bytes">
+  Installation data (currently unused but reserved for future use)
+</ParamField>
+
+<Note>
+  This function must be called by the smart account during module installation. It sets the initialization flag to enable intent execution.
+</Note>
+
+### onUninstall
+
+```solidity
+function onUninstall(bytes calldata data) external
+```
+
+Handles module uninstallation from a smart account. Clears initialization state for the calling account.
+
+<ParamField path="data" type="bytes">
+  Uninstallation data (currently unused but reserved for future cleanup)
+</ParamField>
+
+<Warning>
+  After uninstallation, the module will no longer be able to execute intents for the account.
+</Warning>
+
+## Intent Execution Methods
+
+The `IntentExecutor` provides multiple execution methods inherited from its specialized executor contracts:
+
+### Compact Intent Execution
+
+See [CompactIntentExecutor](/api/executor/compact-intent) for:
+- `executePreClaimOpsWithCompactStub` - Origin chain pre-claim operations
+- `executeTargetOpsWithCompactStub` - Destination chain target operations
+- `isCompactIntentNonceConsumed` - Nonce status checking
+
+### Permit2 Intent Execution
+
+See [Permit2IntentExecutor](/api/executor/permit2-intent) for:
+- `executePreClaimOpsWithPermit2Stub` - Permit2-based pre-claim operations
+- `executeTargetOpsWithPermit2Stub` - Permit2-based target operations
+- `isPermit2IntentNonceConsumed` - Nonce status checking
+
+### Standalone Intent Execution
+
+See [StandaloneIntentExecutor](/api/executor/standalone-intent) for:
+- `executeMultichainOps` - Multi-chain operations without gas refund
+- `executeMultichainOpsWithGasRefund_ERC20` - Multi-chain with ERC20 gas refund
+- `executeMultichainOpsWithGasRefund_ETH` - Multi-chain with ETH gas refund
+- `executeSinglechainOps` - Single-chain operations without gas refund
+- `executeSinglechainOpsWithGasRefund_ERC20` - Single-chain with ERC20 gas refund
+- `executeSinglechainOpsWithGasRefund_ETH` - Single-chain with ETH gas refund
+- `isStandaloneIntentNonceConsumed` - Nonce status checking
+
+## Signature Validation
+
+The contract uses sophisticated signature validation through the `ValidateSignature` base contract, supporting multiple validation modes:
+
+### Validation Modes
+
+- **ERC1271**: Direct signature validation using the account's ERC-1271 implementation
+- **EMISSARY**: Session key validation through authorized emissaries
+- **EMISSARY_EXECUTION**: Execution-aware emissary validation with operation context
+- **Hybrid Modes**: Fallback combinations (e.g., `EMISSARY_ERC1271`, `ERC1271_EMISSARY`)
+
+### Security Model
+
+The signature validation system provides:
+
+1. **EIP-712 Structured Data**: Type-safe signature generation and validation
+2. **Emissary Authorization**: Session keys authorized via The Compact protocol
+3. **Execution Context**: Validation can consider the operations being executed
+4. **Nonce Management**: Replay protection with per-account, per-protocol nonces
+
+<Tip>
+  Emissary validation enables powerful delegation patterns like session keys with fine-grained permissions, while maintaining security through The Compact protocol's authorization system.
+</Tip>
+
+## Security Considerations
+
+<Warning>
+  This contract aggregates multiple execution paths, each with different trust models. Users and integrators should understand the security implications of each execution type:
+  
+  - **Compact Execution**: Relies on The Compact protocol's cross-chain verification
+  - **Permit2 Execution**: Uses Uniswap's Permit2 domain separator for replay protection
+  - **Standalone Execution**: Chain-agnostic signatures with account-level nonces
+  - **Trusted Execution**: Bypasses signature checks for authorized parties
+</Warning>
+
+### Best Practices
+
+1. **Module Installation**: Only install on accounts with proper access controls
+2. **Nonce Management**: Track nonces separately for each execution protocol
+3. **Signature Validation**: Understand which validation mode is being used
+4. **Cross-Chain Operations**: Verify claim hashes match across chains
+5. **Gas Refunds**: Validate exchange rates and overhead parameters
+
+## Integration Example
+
+```solidity
+// Install the IntentExecutor module on an ERC-7579 smart account
+IERC7579Account account = IERC7579Account(smartAccountAddress);
+account.installModule(
+    MODULE_TYPE_EXECUTOR,
+    address(intentExecutor),
+    "" // No initialization data needed
+);
+
+// Check if module is installed
+bool initialized = intentExecutor.isInitialized(smartAccountAddress);
+
+// Execute a Compact intent (via router)
+// See CompactIntentExecutor documentation for details
+```
+
+## Related Contracts
+
+- [CompactIntentExecutor](/api/executor/compact-intent) - Cross-chain Compact protocol execution
+- [Permit2IntentExecutor](/api/executor/permit2-intent) - Permit2-based execution
+- [StandaloneIntentExecutor](/api/executor/standalone-intent) - Self-contained execution

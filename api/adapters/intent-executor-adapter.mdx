@@ -1,0 +1,312 @@
+---
+title: IntentExecutorAdapter
+description: Gas-optimized adapter for forwarding intent execution calls
+---
+
+## Overview
+
+`IntentExecutorAdapter` is a gas-optimized adapter contract that implements a transparent forwarding pattern for intent execution requests. It acts as a proxy between the router and the actual intent executor, minimizing gas overhead through memory-safe assembly operations.
+
+**Source**: `src/adapters/IntentExecutorAdapter.sol`
+
+**Inherits**: `AdapterBase`
+
+## Forwarding Pattern
+
+The adapter uses memory-safe assembly for calldata forwarding to achieve minimal gas overhead, typically saving 200-500 gas per call compared to high-level Solidity forwarding patterns.
+
+It handles three types of intent execution patterns:
+- **Compact intent execution** (ERC-7683 style)
+- **Permit2 intent execution** (with token approvals)
+- **Standalone multichain intent execution**
+- **Standalone single-chain intent execution**
+
+<Info>
+This adapter does not consume any relayerContext data. It uses `ADAPTER_TAG` with `setSkipRelayerContext()` flag.
+</Info>
+
+## State Variables
+
+### EXECUTOR
+
+```solidity
+address internal immutable EXECUTOR
+```
+
+The immutable address of the intent executor contract that handles actual execution.
+
+### Function Selectors
+
+Cached function selectors for gas efficiency:
+
+```solidity
+bytes4 internal constant PERMIT2_INTENT_SELECTOR = 
+    IPermit2IntentExecutor.executeTargetOpsWithPermit2Stub.selector;
+
+bytes4 internal constant COMPACT_INTENT_SELECTOR = 
+    ICompactIntentExecutor.executeTargetOpsWithCompactStub.selector;
+
+bytes4 internal constant STANDALONE_INTENT_SELECTOR = 
+    IStandaloneIntentExecutor.executeMultichainOps.selector;
+
+bytes4 internal constant STANDALONE_SINGLE_CHAIN_INTENT_SELECTOR = 
+    IStandaloneIntentExecutor.executeSinglechainOps.selector;
+```
+
+## Errors
+
+### ForwardingToExecutorFailed
+
+```solidity
+error ForwardingToExecutorFailed()
+```
+
+Thrown when the forwarding call to the intent executor fails. This indicates that the underlying executor either reverted or ran out of gas. The original revert reason is not preserved to maintain gas efficiency.
+
+## Constructor
+
+```solidity
+constructor(address router, address executor)
+```
+
+Initializes the IntentExecutorAdapter with router and executor addresses.
+
+<ParamField path="router" type="address">
+  The address of the router contract that will call this adapter
+</ParamField>
+
+<ParamField path="executor" type="address">
+  The address of the intent executor contract that will handle forwarded calls
+</ParamField>
+
+## Fill Functions
+
+### handleFill_intentExecutor_handleCompactTargetOps
+
+```solidity
+function handleFill_intentExecutor_handleCompactTargetOps(
+    bytes calldata executorCalldata
+)
+    external
+    payable
+    onlyViaRouter
+    returns (bytes4)
+```
+
+Handles compact intent execution by forwarding to the executor. Called by the router to execute compact-style intents following the ERC-7683 standard for cross-chain intent execution.
+
+<ParamField path="executorCalldata" type="bytes">
+  The ABI-encoded parameters for the compact intent execution, typically containing target operations, token amounts, and execution context
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector of this function to confirm successful handling
+</ResponseField>
+
+**Execution Flow**:
+1. Router receives compact intent execution request
+2. Router calls this function with encoded parameters
+3. Function forwards to `executor.executeTargetOpsWithCompactStub(parameters)`
+4. Executor processes compact intent and executes target operations
+
+**Function Selector**: `this.handleFill_intentExecutor_handleCompactTargetOps.selector`
+
+**Gas Optimization**: Optimized forwarding saves gas compared to traditional proxy patterns
+
+### handleFill_intentExecutor_handlePermit2TargetOps
+
+```solidity
+function handleFill_intentExecutor_handlePermit2TargetOps(
+    bytes calldata executorCalldata
+)
+    external
+    payable
+    onlyViaRouter
+    returns (bytes4)
+```
+
+Handles Permit2-based intent execution by forwarding to the executor. Uses Permit2 for token approvals, enabling gasless token approvals through signed permits.
+
+<ParamField path="executorCalldata" type="bytes">
+  The ABI-encoded parameters for the Permit2 intent execution, including permit signatures, token details, and target operations
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector of this function to confirm successful handling
+</ResponseField>
+
+**Execution Flow**:
+1. User signs Permit2 permit for token transfer
+2. Router receives intent execution request with permit signature
+3. Router calls this function with encoded permit and parameters
+4. Function forwards to `executor.executeTargetOpsWithPermit2Stub(parameters)`
+5. Executor validates permit signature and executes target operations
+
+**Function Selector**: `this.handleFill_intentExecutor_handlePermit2TargetOps.selector`
+
+<Warning>
+Permit2 signature validation is handled by the executor, not this adapter.
+</Warning>
+
+### handleFill_intentExecutor_executeMultichainOps
+
+```solidity
+function handleFill_intentExecutor_executeMultichainOps(
+    bytes calldata executorCalldata
+)
+    external
+    payable
+    onlyViaRouter
+    returns (bytes4)
+```
+
+Handles standalone multichain intent execution by forwarding to the executor. Processes cross-chain operations without the additional abstractions of Compact or Permit2 patterns.
+
+<ParamField path="executorCalldata" type="bytes">
+  The ABI-encoded parameters for the multichain operation execution, containing cross-chain operation details and execution parameters
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector of this function to confirm successful handling
+</ResponseField>
+
+**Execution Flow**:
+1. Router receives multichain operation request
+2. Router calls this function with encoded operation parameters
+3. Function forwards to `executor.executeMultichainOps(parameters)`
+4. Executor processes multichain operations across target chains
+
+**Function Selector**: `this.handleFill_intentExecutor_executeMultichainOps.selector`
+
+### handleFill_intentExecutor_executeSinglechainOps
+
+```solidity
+function handleFill_intentExecutor_executeSinglechainOps(
+    bytes calldata executorCalldata
+)
+    external
+    payable
+    onlyViaRouter
+    returns (bytes4)
+```
+
+Handles standalone single-chain intent execution by forwarding to the executor. Simpler than multichain intents as they only require chain-specific signature validation.
+
+<ParamField path="executorCalldata" type="bytes">
+  The ABI-encoded parameters for the single-chain operation execution, containing operation details and execution parameters
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="selector" type="bytes4">
+  The function selector of this function to confirm successful handling
+</ResponseField>
+
+**Execution Flow**:
+1. Router receives single-chain operation request
+2. Router calls this function with encoded operation parameters
+3. Function forwards to `executor.executeSinglechainOps(parameters)`
+4. Executor processes operations on the current chain
+
+**Function Selector**: `this.handleFill_intentExecutor_executeSinglechainOps.selector`
+
+## Interface Support
+
+### supportsInterface
+
+```solidity
+function supportsInterface(bytes4 selector) 
+    public 
+    pure 
+    override 
+    returns (bool supported)
+```
+
+Implements ERC-165 interface detection to declare support for the four intent execution handlers.
+
+<ParamField path="selector" type="bytes4">
+  The 4-byte interface selector to check for support
+</ParamField>
+
+**Returns**:
+
+<ResponseField name="supported" type="bool">
+  True if the selector is supported by this contract. Supported selectors:
+  - `handleFill_intentExecutor_handleCompactTargetOps.selector`
+  - `handleFill_intentExecutor_handlePermit2TargetOps.selector`
+  - `handleFill_intentExecutor_executeMultichainOps.selector`
+  - `handleFill_intentExecutor_executeSinglechainOps.selector`
+  - Any selectors supported by AdapterBase
+</ResponseField>
+
+## Adapter Tag
+
+### ADAPTER_TAG
+
+```solidity
+function ADAPTER_TAG() external pure override returns (bytes12)
+```
+
+Returns the adapter tag with `skipRelayerContext` flag set.
+
+**Returns**:
+
+<ResponseField name="adapterTag" type="bytes12">
+  `Constants.DEFAULT_ADAPTER_TAG.setSkipRelayerContext()`
+</ResponseField>
+
+This indicates that the adapter does not consume relayer context data, allowing the Router to skip context appending for gas savings.
+
+## Gas Optimization
+
+The adapter uses `AdapterCalldataPassthroughLib` for efficient calldata forwarding:
+
+```solidity
+EXECUTOR.passthrough(SELECTOR, executorCalldata);
+```
+
+This assembly-based approach:
+- Saves 200-500 gas per call compared to high-level Solidity
+- Uses zero-copy calldata forwarding with `calldatacopy`
+- Minimizes memory allocation
+- Properly propagates revert data from executor
+
+<Info>
+The passthrough library is memory-safe and properly manages the free memory pointer to ensure compatibility with Solidity's memory model.
+</Info>
+
+## Security Considerations
+
+<Warning>
+- Only callable via Router delegatecall (enforced by `onlyViaRouter`)
+- Executes in Router's context with access to Router's storage and balance
+- All external calls go to the trusted EXECUTOR address set at construction
+- Revert data from executor is properly propagated
+</Warning>
+
+## Usage Example
+
+```solidity
+// Router calls adapter with intent execution request
+router.execute(
+    intentExecutorAdapter,
+    abi.encodeWithSelector(
+        intentExecutorAdapter.handleFill_intentExecutor_handleCompactTargetOps.selector,
+        executorCalldata
+    )
+);
+
+// Adapter forwards to executor efficiently
+// executor.executeTargetOpsWithCompactStub(decodedParams)
+```
+
+## Related Contracts
+
+- [AdapterBase](/api/adapters/adapter-base) - Base adapter functionality
+- [IntentExecutor](/api/executor/intent-executor) - Target executor contract

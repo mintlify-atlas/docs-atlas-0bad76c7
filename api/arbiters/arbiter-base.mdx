@@ -1,0 +1,292 @@
+---
+title: 'ArbiterBase'
+description: 'Base arbiter contract enabling unlocking funds from user accounts or resource locks'
+icon: 'shield-halved'
+---
+
+## Overview
+
+ArbiterBase is the foundational contract in the Warp Router ecosystem that enables arbiters to unlock and manage funds on behalf of users. It provides dual protocol support for both TheCompact and Permit2 standards, enabling flexible settlement mechanisms.
+
+<Info>
+  ArbiterBase combines CompactArbiter, Permit2Arbiter, and PreClaimExecution functionality into a unified base contract that all arbiters extend.
+</Info>
+
+## Key Responsibilities
+
+- Executes pre-claim operations before settlement
+- Computes mandate hashes for protocol validation
+- Maintains Router-only access control for security
+- Orchestrates the settlement flow for both Compact and Permit2 protocols
+
+## Security Model
+
+<Warning>
+  Only the Router can call settlement functions. This prevents unauthorized access to user funds and ensures proper validation of all operations.
+</Warning>
+
+The contract enforces strict access control through the `onlyRouter` modifier, which validates that `msg.sender == ROUTER` before allowing any settlement operations.
+
+## Constructor
+
+```solidity
+constructor(
+    address router,
+    address compact,
+    address addressBook
+)
+```
+
+<ParamField path="router" type="address" required>
+  The Router contract address that will have exclusive access to settlement functions.
+</ParamField>
+
+<ParamField path="compact" type="address" required>
+  TheCompact protocol contract address for Compact-based settlements.
+</ParamField>
+
+<ParamField path="addressBook" type="address" required>
+  The AddressBook contract for protocol configuration and address lookup.
+</ParamField>
+
+## Pre-Claim Operations
+
+### Compact Pre-Claim Operations
+
+```solidity
+function _compactPreClaimOps(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs,
+    bytes32[] calldata otherElements,
+    uint256 elementOffset,
+    uint256 notarizedChainId
+) internal returns (bytes32 mandateHash)
+```
+
+Orchestrates the pre-settlement validation and execution flow for TheCompact protocol.
+
+<Steps>
+  <Step title="Compute EIP-712 hashes">
+    Computes hashes for order components including target attributes, operations, and qualifier data.
+  </Step>
+  <Step title="Execute pre-claim operations">
+    If pre-claim operations exist and are ERC7579 type, executes them with proper signature validation.
+  </Step>
+  <Step title="Return mandate hash">
+    Returns the computed mandate hash needed for TheCompact claim operations.
+  </Step>
+</Steps>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  The order containing all settlement data including sponsor, operations, and tokens.
+</ParamField>
+
+<ParamField path="sigs" type="Types.Signatures" required>
+  The signatures required for validation.
+</ParamField>
+
+<ParamField path="otherElements" type="bytes32[]" required>
+  Additional elements for cross-chain validation.
+</ParamField>
+
+<ParamField path="elementOffset" type="uint256" required>
+  The offset for element processing in the order array.
+</ParamField>
+
+<ParamField path="notarizedChainId" type="uint256" required>
+  The chain ID where the order was notarized.
+</ParamField>
+
+#### Operation Types
+
+Pre-claim operations support three execution modes:
+
+<Tabs>
+  <Tab title="ERC7579">
+    Executes operations following the ERC7579 smart account standard. Uses sponsor account, pre-claim operations, and signature validation through TheCompact protocol.
+
+    ```solidity
+    _handlePreClaimOpsCompactERC7579({
+        account: order.sponsor,
+        order: order,
+        signature: sigs,
+        elementStub: elementStub,
+        notarizedChainId: notarizedChainId,
+        preClaimGasStipend: preClaimGasStipend,
+        sigMode: order.preClaimOps.extractSigMode()
+    });
+    ```
+  </Tab>
+  <Tab title="MultiCall">
+    Handles batched operations through multicall pattern, allowing multiple contract calls in a single transaction.
+
+    ```solidity
+    _handlePreClaimOpsMulticall({
+        preClaimOps: order.preClaimOps,
+        preClaimGasStipend: preClaimGasStipend
+    });
+    ```
+  </Tab>
+  <Tab title="Calldata">
+    Handles raw calldata execution for simple contract calls. Extracts target address and calldata from the operation.
+
+    ```solidity
+    (address target, bytes calldata callData) = 
+        SmartExecutionLib.toCalldata(order.preClaimOps.onlyExecutionData());
+    _handlePreClaimOpsCallData({
+        target: target,
+        callData: callData,
+        preClaimGasStipend: preClaimGasStipend
+    });
+    ```
+  </Tab>
+</Tabs>
+
+### Permit2 Pre-Claim Operations
+
+```solidity
+function _permit2PreClaimOps(
+    Types.Order calldata order,
+    Types.Signatures calldata sigs
+) internal returns (bytes32 mandateHash)
+```
+
+Orchestrates the pre-settlement validation and execution flow for Permit2 protocol.
+
+<Info>
+  Unlike Compact integration, Permit2 uses a different stub structure and execution path but maintains the same core validation and mandate hash computation logic.
+</Info>
+
+#### Parameters
+
+<ParamField path="order" type="Types.Order" required>
+  The order containing all settlement data including sponsor, operations, and tokens.
+</ParamField>
+
+<ParamField path="sigs" type="Types.Signatures" required>
+  The signatures required for validation, specifically uses `notarizedClaimSig` for Permit2.
+</ParamField>
+
+## Mandate Hash Computation
+
+The mandate hash is computed using EIP-712 structured data hashing:
+
+```solidity
+mandateHash = EIP712TypeHashLib.hashMandateRaw({
+    targetAttributes: targetAttributesHash,
+    minGas: minGas,
+    preClaimOpsHash: preClaimOpsHash,
+    destOpsHash: destOpsHash,
+    qHash: qHash
+});
+```
+
+<Tip>
+  The mandate hash uniquely identifies the entire order and its operations, serving as cryptographic proof for both TheCompact and Permit2 protocols.
+</Tip>
+
+## Access Control
+
+### onlyRouter Modifier
+
+```solidity
+modifier onlyRouter() {
+    _onlyRouter();
+    _;
+}
+```
+
+Restricts function access to only the authorized Router contract.
+
+<Danger>
+  This modifier is critical for maintaining the security model of the arbiter system. It ensures that only the Router can execute settlement operations, preventing:
+  - Unauthorized access to user funds
+  - Bypass of Router's validation logic
+  - Direct manipulation of arbiter state
+</Danger>
+
+### requireNoOps Modifier
+
+```solidity
+modifier requireNoOps(Types.Operation calldata ops) {
+    _requireNoOps(ops);
+    _;
+}
+```
+
+Enforces that a claim function does not include any operations.
+
+<Info>
+  Use this modifier when arbiters want to restrict claim functions to pure token transfers without any additional pre-claim or destination operations. This is useful for:
+  - Simple settlement flows that only require token movement
+  - Security-sensitive contexts where operation execution should be prohibited
+  - Gas-optimized paths that skip operation processing overhead
+</Info>
+
+## Gas Validation
+
+```solidity
+function _requireValidGasLeft(uint128 minGas) private view
+```
+
+Validates that sufficient gas is available to satisfy the `minGas` requirement.
+
+<Warning>
+  Accounts for EIP-150's 63/64 rule: when making a call, only 63/64 of remaining gas is forwarded. To ensure `minGas` is available in the subcall, we need:
+  
+  `requiredGas = minGas + (minGas / 63) + 10_000`
+  
+  The 10k buffer covers execution overhead between the check and the actual call. This protects against griefing attacks where callers provide just enough gas to pass validation but not enough to execute the operation.
+</Warning>
+
+## Errors
+
+### OnlyRouter
+
+```solidity
+error OnlyRouter();
+```
+
+Thrown when a function is called by an address other than the authorized Router. This error enforces the critical security boundary that prevents unauthorized entities from executing settlement operations.
+
+### NoOperationsAllowed
+
+```solidity
+error NoOperationsAllowed();
+```
+
+Thrown when a claim includes operations but the arbiter requires none. This error is raised when the operation hash does not match the `NO_OPS` constant.
+
+## Interface Support
+
+```solidity
+function supportsInterface(bytes4 selector) public pure virtual returns (bool)
+```
+
+Returns whether the contract implements a given interface.
+
+<ParamField path="selector" type="bytes4" required>
+  The interface identifier to check.
+</ParamField>
+
+Supports:
+- `IERC165.supportsInterface`
+- `IArbiter` interface
+
+## Qualifier Hash
+
+```solidity
+function qualificationHash(bytes calldata data) external pure virtual returns (bytes32 result)
+```
+
+Returns the hash of the qualifier data for mandate validation.
+
+<ParamField path="data" type="bytes" required>
+  The qualifier data to hash.
+</ParamField>
+
+## Source Code Reference
+
+Location: `/src/base/arbiter/ArbiterBase.sol:33`
