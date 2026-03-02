@@ -77,7 +77,9 @@
               "api/adapters/adapter-base",
               "api/adapters/same-chain-adapter",
               "api/adapters/intent-executor-adapter",
-              "api/adapters/multicall-adapter"
+              "api/adapters/intent-executor-adapter-gas-refund",
+              "api/adapters/multicall-adapter",
+              "api/adapters/single-call-adapter"
             ]
           },
           {

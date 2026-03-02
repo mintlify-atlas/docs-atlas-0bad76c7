@@ -1,0 +1,248 @@
+---
+title: IntentExecutorAdapterGasRefund
+description: Gas-optimized adapter for forwarding intent execution calls with gas refund support
+---
+
+## Overview
+
+`IntentExecutorAdapterGasRefund` is a specialized adapter that extends the intent execution forwarding pattern to support gas refund functionality. It enables solvers to execute user intents while receiving compensation for gas costs directly from the user's account.
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol`
+
+**Inherits**: `AdapterBase`
+
+## Key Features
+
+- **Gas Refund Support**: Solvers receive gas compensation in user-specified tokens
+- **Multichain Support**: Handles both multichain and single-chain operations with refunds
+- **Signature Protection**: Gas refund terms must be included in user's signature
+- **Memory-Safe Forwarding**: Uses assembly for efficient calldata passthrough
+
+<Info>
+This adapter expects exactly 20 bytes of relayer context containing the gas refund recipient address.
+</Info>
+
+## State Variables
+
+### EXECUTOR
+
+```solidity
+address internal immutable EXECUTOR
+```
+
+The immutable address of the IntentExecutor contract that handles actual intent execution.
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:38`
+
+## Constructor
+
+```solidity
+constructor(address router, address executor)
+```
+
+Initializes the adapter with router and executor addresses.
+
+<ParamField path="router" type="address" required>
+  The address of the Router contract that will call this adapter via delegatecall
+</ParamField>
+
+<ParamField path="executor" type="address" required>
+  The address of the StandaloneIntentExecutor contract
+</ParamField>
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:49`
+
+## Internal Functions
+
+### _gasRefundRecipient
+
+```solidity
+function _gasRefundRecipient() internal pure returns (address gasRefundRecipient)
+```
+
+Extracts the gas refund recipient address from the relayer context.
+
+**Returns**: The address that will receive gas refund tokens (ERC20 or native ETH)
+
+**Validation**: Requires exactly 20 bytes of relayer context
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:60-65`
+
+## Fill Functions
+
+### handleFill_intentExecutor_executeMultichainOps_gasRefund
+
+```solidity
+function handleFill_intentExecutor_executeMultichainOps_gasRefund(
+    IStandaloneIntentExecutor.MultiChainOps calldata ops,
+    IStandaloneIntentExecutor.GasRefund calldata gasRefund
+) external onlyViaRouter returns (bytes4)
+```
+
+Handles multichain intent execution with gas refund to the solver.
+
+<ParamField path="ops" type="MultiChainOps" required>
+  The multichain operations structure containing:
+  - `account`: User's smart account address
+  - `operations`: Array of `Target` operations to execute
+  - `nonce`: Unique nonce for replay protection
+  - `signature`: User's signature authorizing the execution and gas refund
+</ParamField>
+
+<ParamField path="gasRefund" type="GasRefund" required>
+  The gas refund terms:
+  - `token`: Address of ERC20 token (or address(0) for native ETH)
+  - `amount`: Amount of tokens to refund to the solver
+</ParamField>
+
+**Returns**: `this.handleFill_intentExecutor_executeMultichainOps_gasRefund.selector`
+
+**Execution Flow**:
+1. Extracts gas refund recipient from relayer context
+2. Forwards call to `StandaloneIntentExecutor.executeMultichainOps_gasRefund`
+3. Executor validates signature (must include gas refund terms)
+4. Executor processes operations across chains
+5. Executor transfers gas refund to the solver's specified address
+
+<Warning>
+The gas refund terms must be included in the user's signature to prevent manipulation by solvers.
+</Warning>
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:78-86`
+
+### handleFill_intentExecutor_executeSingleChainOps_gasRefund
+
+```solidity
+function handleFill_intentExecutor_executeSingleChainOps_gasRefund(
+    IStandaloneIntentExecutor.SingleChainOps calldata ops,
+    IStandaloneIntentExecutor.GasRefund calldata gasRefund
+) external onlyViaRouter returns (bytes4)
+```
+
+Handles single-chain intent execution with gas refund to the solver.
+
+<ParamField path="ops" type="SingleChainOps" required>
+  The single-chain operations structure containing:
+  - `account`: User's smart account address
+  - `operations`: Array of `Target` operations to execute on this chain
+  - `nonce`: Unique nonce for replay protection
+  - `signature`: User's signature authorizing the execution and gas refund
+</ParamField>
+
+<ParamField path="gasRefund" type="GasRefund" required>
+  The gas refund terms (token and amount)
+</ParamField>
+
+**Returns**: `this.handleFill_intentExecutor_executeSingleChainOps_gasRefund.selector`
+
+**Execution Flow**:
+1. Extracts gas refund recipient from relayer context
+2. Forwards call to `StandaloneIntentExecutor.executeSingleChainOps_gasRefund`
+3. Executor validates signature (must include gas refund terms)
+4. Executor processes operations on the current chain
+5. Executor transfers gas refund to the solver's specified address
+
+**Gas Optimization**: Single-chain execution is more gas-efficient than multichain for operations on one chain.
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:95-103`
+
+## Interface Support
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public pure override returns (bool)
+```
+
+Returns true if the contract implements the given interface.
+
+**Supported Interfaces**:
+- `handleFill_intentExecutor_executeMultichainOps_gasRefund.selector`
+- `handleFill_intentExecutor_executeSingleChainOps_gasRefund.selector`
+- All interfaces from `AdapterBase`
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:107-115`
+
+## Adapter Tag
+
+```solidity
+function ADAPTER_TAG() public pure override returns (bytes12)
+```
+
+Returns the adapter tag for this adapter. The tag is configured to **NOT** skip relayer context since this adapter requires the gas refund recipient address.
+
+**Source**: `src/adapters/IntentExecutorAdapterGasRefund.sol:117-119`
+
+## Relayer Context Format
+
+The adapter expects exactly **20 bytes** of relayer context:
+
+```
+Bytes 0-19: Gas refund recipient address (address)
+```
+
+Example relayer context construction:
+
+```solidity
+address gasRefundRecipient = 0x1234...; // Solver's address
+bytes memory relayerContext = abi.encodePacked(gasRefundRecipient);
+```
+
+## Gas Refund Security Model
+
+<Warning>
+**Critical Security Requirement**: The gas refund terms (token and amount) MUST be included in the user's signature.
+</Warning>
+
+The signature validation ensures that:
+1. Users explicitly authorize the gas refund amount
+2. Solvers cannot increase the refund amount
+3. Solvers cannot change the refund token
+4. The refund recipient is controlled by the solver (via relayer context)
+
+**Signature Structure**: Users sign a hash that includes:
+- Account address
+- Operations to execute
+- Nonce for replay protection
+- **Gas refund token and amount**
+
+## Usage Example
+
+```solidity
+// 1. Prepare gas refund terms (user signs this)
+IStandaloneIntentExecutor.GasRefund memory gasRefund = IStandaloneIntentExecutor.GasRefund({
+    token: 0xA0b86..., // USDC address
+    amount: 5e6         // 5 USDC
+});
+
+// 2. Prepare relayer context with gas refund recipient
+address solverAddress = 0x5678...;
+bytes memory relayerContext = abi.encodePacked(solverAddress);
+
+// 3. Prepare adapter calldata
+bytes memory adapterCalldata = abi.encodeWithSelector(
+    IntentExecutorAdapterGasRefund.handleFill_intentExecutor_executeMultichainOps_gasRefund.selector,
+    multiChainOps,
+    gasRefund
+);
+
+// 4. Call router with atomic signature
+router.optimized_routeFill921336808(
+    relayerContext,
+    adapterCalldata,
+    atomicSignature
+);
+```
+
+## Comparison with IntentExecutorAdapter
+
+| Feature | IntentExecutorAdapter | IntentExecutorAdapterGasRefund |
+|---------|----------------------|--------------------------------|
+| Gas Refund Support | ❌ No | ✅ Yes |
+| Relayer Context | None (skipped) | 20 bytes (gas refund recipient) |
+| Signature Requirements | Operations only | Operations + gas refund terms |
+| Use Case | Free execution or external compensation | On-chain solver compensation |
+
+## Related Contracts
+
+- [AdapterBase](/api/adapters/adapter-base) - Base adapter functionality
+- [IntentExecutorAdapter](/api/adapters/intent-executor-adapter) - Basic intent forwarding without gas refund
+- [StandaloneIntentExecutor](/api/executor/standalone-intent) - Target executor for standalone intents

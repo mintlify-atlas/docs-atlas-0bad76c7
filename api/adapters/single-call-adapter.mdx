@@ -1,0 +1,250 @@
+---
+title: SingleCallAdapter
+description: Adapter for executing a single arbitrary call through the Warp Router
+---
+
+## Overview
+
+`SingleCallAdapter` is a minimal adapter that enables solvers to execute a single arbitrary contract call on behalf of users. It provides a gas-efficient way to perform individual operations without the overhead of batching logic.
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol`
+
+**Inherits**: `AdapterBase`, `Caller`
+
+## Use Cases
+
+- **Token Swaps**: Execute a single DEX swap operation
+- **NFT Purchases**: Buy a single NFT from a marketplace
+- **Contract Interactions**: Call any single contract function
+- **Simple Operations**: Any operation that doesn't require batching
+
+<Info>
+For multiple calls in a single transaction, use [MultiCallAdapter](/api/adapters/multicall-adapter) instead.
+</Info>
+
+## Constructor
+
+```solidity
+constructor(address router)
+```
+
+Initializes the SingleCallAdapter with the router address.
+
+<ParamField path="router" type="address" required>
+  The address of the Router contract that will call this adapter via delegatecall
+</ParamField>
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol:46`
+
+## Fill Function
+
+### singleCall
+
+```solidity
+function singleCall(
+    bytes32 nonce,
+    address sponsor,
+    bytes calldata packedData
+) external payable onlyViaRouter returns (bytes4)
+```
+
+Executes a single call fill operation.
+
+<ParamField path="nonce" type="bytes32" required>
+  Unique identifier for tracking this fill operation. Used in the `RouterFilled` event for indexing and tracking.
+</ParamField>
+
+<ParamField path="sponsor" type="address" required>
+  The account address associated with this fill. Emitted in the `RouterFilled` event for tracking which user this fill is for.
+</ParamField>
+
+<ParamField path="packedData" type="bytes" required>
+  Packed calldata in the format: `[target(20 bytes)][callData(...)]`
+  
+  - **Bytes 0-19**: Target contract address
+  - **Bytes 20+**: Calldata to forward to the target contract
+</ParamField>
+
+**Returns**: `this.singleCall.selector` on success
+
+**Reverts**: `SingleCallFailed()` if the call to the target contract fails
+
+**Execution Flow**:
+1. Extracts target address from first 20 bytes of `packedData`
+2. Extracts calldata from remaining bytes
+3. Executes `target.call{value: msg.value}(calldata)`
+4. Emits `RouterFilled(nonce, sponsor)` event
+5. Returns function selector for verification
+
+<Warning>
+The call is executed with `msg.value` forwarded. Ensure the Router has sufficient ETH balance if the target requires native ETH.
+</Warning>
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol:61-76`
+
+## Packed Data Format
+
+The `packedData` parameter uses a gas-efficient packed encoding:
+
+```
+┌──────────────────────┬────────────────────────────┐
+│ Target Address       │ Call Data                  │
+│ (20 bytes)          │ (variable length)          │
+└──────────────────────┴────────────────────────────┘
+```
+
+Example construction:
+
+```solidity
+address target = 0x1234...;      // DEX router
+bytes memory callData = abi.encodeWithSelector(
+    IUniswapV2Router.swapExactTokensForTokens.selector,
+    amountIn,
+    amountOutMin,
+    path,
+    recipient,
+    deadline
+);
+
+bytes memory packedData = abi.encodePacked(target, callData);
+```
+
+## Interface Support
+
+```solidity
+function supportsInterface(bytes4 interfaceId) public pure override returns (bool)
+```
+
+Returns true if the contract implements the given interface.
+
+**Supported Interfaces**:
+- `singleCall.selector` (0x...)
+- All interfaces from `AdapterBase`
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol:78-84`
+
+## Adapter Tag
+
+```solidity
+function ADAPTER_TAG() public pure override returns (bytes12)
+```
+
+Returns the adapter tag configured to skip relayer context (this adapter doesn't use relayer context).
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol:86-88`
+
+## Events
+
+### RouterFilled
+
+```solidity
+event RouterFilled(bytes32 indexed nonce, address indexed sponsor)
+```
+
+Emitted when a single call fill operation completes successfully.
+
+<ParamField path="nonce" type="bytes32">
+  The unique identifier for this fill operation
+</ParamField>
+
+<ParamField path="sponsor" type="address">
+  The account address associated with this fill
+</ParamField>
+
+This event allows indexers to track which fills were executed for which users.
+
+## Errors
+
+### SingleCallFailed
+
+```solidity
+error SingleCallFailed()
+```
+
+Thrown when the call to the target contract reverts or returns false.
+
+**Source**: `src/arbiters/multicall/SingleCallAdapter.sol:36`
+
+## Gas Optimization
+
+The SingleCallAdapter uses several gas optimization techniques:
+
+1. **Assembly Forwarding**: Uses memory-safe assembly to forward calldata without re-encoding
+2. **Packed Encoding**: Avoids ABI encoding overhead for target address and calldata
+3. **No Relayer Context**: Skips relayer context parsing for additional gas savings
+4. **Direct Execution**: No intermediate calls to arbiters or validators
+
+**Gas Savings**: Approximately 2,000-3,000 gas compared to using a batching adapter for a single call.
+
+## Usage Example
+
+```solidity
+// Example: Execute a DEX swap on Uniswap V2
+
+// 1. Prepare the target and calldata
+address uniswapRouter = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+address[] memory path = new address[](2);
+path[0] = USDC;
+path[1] = WETH;
+
+bytes memory swapCalldata = abi.encodeWithSelector(
+    IUniswapV2Router.swapExactTokensForTokens.selector,
+    1000e6,          // 1000 USDC
+    0,               // amountOutMin (use a real value in production)
+    path,
+    userAddress,     // recipient
+    block.timestamp  // deadline
+);
+
+// 2. Pack target and calldata
+bytes memory packedData = abi.encodePacked(uniswapRouter, swapCalldata);
+
+// 3. Prepare adapter calldata
+bytes32 nonce = keccak256(abi.encode(userAddress, block.timestamp));
+bytes memory adapterCalldata = abi.encodeWithSelector(
+    SingleCallAdapter.singleCall.selector,
+    nonce,
+    userAddress,
+    packedData
+);
+
+// 4. Execute via router
+router.optimized_routeFill921336808(
+    "",              // empty relayer context
+    adapterCalldata,
+    atomicSignature
+);
+```
+
+## Security Considerations
+
+<Warning>
+**Critical**: The target contract and calldata are provided by the solver. Users must trust that the solver will execute the correct operation.
+</Warning>
+
+**Security Model**:
+1. **Atomic Signature Required**: Router enforces atomic fill signature validation
+2. **Nonce Tracking**: The `nonce` parameter allows tracking of fill operations
+3. **Event Emission**: `RouterFilled` event provides audit trail
+4. **Sponsor Association**: Links fills to specific user accounts
+
+**Best Practices**:
+- Validate the target contract address off-chain before signing
+- Use nonces that prevent replay attacks
+- Monitor `RouterFilled` events to ensure fills match expectations
+- Consider using [MultiCallAdapter](/api/adapters/multicall-adapter) for complex operations requiring multiple steps
+
+## Comparison with MultiCallAdapter
+
+| Feature | SingleCallAdapter | MultiCallAdapter |
+|---------|------------------|------------------|
+| Number of Calls | 1 | Multiple (batched) |
+| Gas Overhead | Lower | Higher (batching logic) |
+| Complexity | Simple | Complex (JIT claims, token validation) |
+| Use Case | Single operation | Complex multi-step operations |
+| Relayer Context | None | Token recipient (20 bytes) |
+
+## Related Contracts
+
+- [AdapterBase](/api/adapters/adapter-base) - Base adapter functionality
+- [MultiCallAdapter](/api/adapters/multicall-adapter) - Multi-call batching for complex operations
