@@ -1,0 +1,119 @@
+{
+  "projectType": "framework",
+  "projectName": "Warp Router",
+  "projectDescription": "A modular, gas-optimized settlement routing system for cross-protocol and cross-chain operations.",
+  "theme": "aspen",
+  "primaryColor": "#6366f1",
+  "lightColor": "#818cf8",
+  "darkColor": "#4f46e5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/router-system",
+              "concepts/adapters",
+              "concepts/arbiters",
+              "concepts/intent-execution",
+              "concepts/fill-and-claim"
+            ]
+          },
+          {
+            "group": "Integration Guide",
+            "pages": [
+              "integration/solvers",
+              "integration/building-adapters",
+              "integration/solver-context",
+              "integration/deployment"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/gas-optimization",
+              "advanced/security",
+              "advanced/protocol-support"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Router",
+            "pages": [
+              "api/router/router-logic",
+              "api/router/router-manager",
+              "api/router/router-utils"
+            ]
+          },
+          {
+            "group": "Adapters",
+            "pages": [
+              "api/adapters/adapter-base",
+              "api/adapters/same-chain-adapter",
+              "api/adapters/intent-executor-adapter",
+              "api/adapters/multicall-adapter"
+            ]
+          },
+          {
+            "group": "Arbiters",
+            "pages": [
+              "api/arbiters/arbiter-base",
+              "api/arbiters/same-chain-arbiter",
+              "api/arbiters/compact-arbiter",
+              "api/arbiters/permit2-arbiter"
+            ]
+          },
+          {
+            "group": "Intent Executor",
+            "pages": [
+              "api/executor/intent-executor",
+              "api/executor/compact-intent",
+              "api/executor/permit2-intent",
+              "api/executor/standalone-intent"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Modular adapter-based architecture for protocol integrations",
+    "Atomic batch execution with cryptographic signature validation",
+    "Support for TheCompact and Permit2 settlement protocols",
+    "Cross-chain settlement capabilities",
+    "Gas-optimized routing with adapter caching (20-40% savings)",
+    "ERC-7579 compatible intent execution system",
+    "Role-based adapter lifecycle management",
+    "Delegatecall-based adapter pattern for extensibility"
+  ],
+  "publicApiSurface": [
+    "Router.routeFill()",
+    "Router.optimized_routeFill921336808()",
+    "Router.routeClaim()",
+    "RouterManager.installFillAdapter()",
+    "RouterManager.hotfixFillAdapter()",
+    "RouterManager.pauseRouter()",
+    "SameChainAdapter.samechain_compact_handleFill()",
+    "SameChainAdapter.samechain_permit2_handleFill()",
+    "IntentExecutor.executeCompactIntent()",
+    "IntentExecutor.executePermit2Intent()",
+    "AdapterBase.supportsInterface()",
+    "SameChainArbiter.handleCompact_NotarizedChain()",
+    "CompactArbiter.claimCompact()",
+    "Permit2Arbiter.claimPermit2()"
+  ]
+}
